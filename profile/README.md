@@ -40,7 +40,7 @@ Project SEKAI: Colorful Stage! is © SEGA / © Colorful Palette Inc. / © Crypto
 
 <div align="center">
 
-Made with 💜 by the SEKAI community
+Made with 💜 by the [25-ji-code-de](https://github.com/25-ji-code-de) team
 
 **25時、コードで。** - Coding at 25 o'clock
 
