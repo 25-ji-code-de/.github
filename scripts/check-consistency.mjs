@@ -18,7 +18,7 @@
  * <checkout-root> 下每个子目录是一个仓库的检出。
  */
 
-import { readFileSync, existsSync, readdirSync, statSync } from 'node:fs';
+import { readFileSync, existsSync, readdirSync, statSync, appendFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { argv } from 'node:process';
 
@@ -263,4 +263,31 @@ if (problems.length) {
 } else {
   console.log('未发现跨仓不一致。');
   process.exitCode = 0;
+}
+
+/* 同时写进 GitHub 的 job summary，省得每次翻日志。 */
+if (process.env.GITHUB_STEP_SUMMARY) {
+  const md = [
+    '# 跨仓一致性检查',
+    '',
+    `检查了 **${repos.length}** 个仓：${repos.map((r) => `\`${r}\``).join('、')}`,
+    '',
+  ];
+  if (problems.length) {
+    md.push(`## ❌ 发现 ${problems.length} 处不一致`, '');
+    for (const p of problems) {
+      const [head, ...rest] = p.split('\n');
+      md.push(`- **${head}**`);
+      if (rest.length) md.push('', '  ```', ...rest.map((l) => `  ${l}`), '  ```', '');
+    }
+    md.push('');
+  } else {
+    md.push('## ✅ 未发现跨仓不一致', '');
+  }
+  if (notes.length) {
+    md.push('<details><summary>已确认一致的项</summary>', '');
+    for (const n of notes) md.push(`- ${n}`);
+    md.push('', '</details>');
+  }
+  appendFileSync(process.env.GITHUB_STEP_SUMMARY, md.join('\n') + '\n');
 }
