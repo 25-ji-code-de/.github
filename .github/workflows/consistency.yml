@@ -1,0 +1,54 @@
+name: Cross-repo Consistency
+
+# 单仓 CI 只能看见自己那一份，看不见"我和别人不一样"。
+# 这个 workflow 把全部仓拉到一起，比对那些必须一致、但没有任何
+# 单仓机制能保证一致的东西。
+#
+# 生态里已经因为缺这层检查踩过：四份漂移的 auth 客户端、三种互不兼容的
+# 错误信封、跨越两年的 compatibility_date、指向旧账号的 repository 字段。
+
+on:
+  schedule:
+    # 每天 03:00 UTC
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/check-consistency.mjs'
+      - '.github/workflows/consistency.yml'
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout .github
+        uses: actions/checkout@v4
+        with:
+          path: _meta
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Checkout all ecosystem repos
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p repos
+          for repo in 25ji-sagyo docs gateway hub nako nightcord \
+                      sekai-auth sekai-pass sekai-worker-kit \
+                      stickers stickers-maker; do
+            echo "::group::clone $repo"
+            git clone --depth 1 --quiet \
+              "https://github.com/25-ji-code-de/$repo.git" "repos/$repo" \
+              || echo "::warning::无法克隆 $repo，跳过"
+            echo "::endgroup::"
+          done
+          # storage-worker 目前还在个人账号下（见 storage-worker#2）
+          git clone --depth 1 --quiet \
+            https://github.com/bili-47177171806/storage-worker.git repos/storage-worker \
+            || echo "::warning::无法克隆 storage-worker，跳过"
+
+      - name: Check consistency
+        run: node _meta/scripts/check-consistency.mjs repos
