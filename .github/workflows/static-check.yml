@@ -219,6 +219,35 @@ jobs:
               if (!text.includes(header)) problems.push(`missing required security header: ${header}`);
             }
 
+            // CSP 写错不会报错，只会静默失效（或更糟：静默拦掉正常资源）。
+            // 这里做基本的语法校验。
+            const KNOWN_DIRECTIVES = new Set([
+              "default-src", "script-src", "style-src", "img-src", "font-src", "media-src",
+              "connect-src", "object-src", "frame-src", "worker-src", "manifest-src",
+              "base-uri", "form-action", "frame-ancestors", "report-uri", "report-to",
+              "upgrade-insecure-requests", "block-all-mixed-content",
+            ]);
+            const SOURCE_OK = /^('self'|'none'|'unsafe-inline'|'unsafe-eval'|'strict-dynamic'|data:|blob:|https:|wss:|'nonce-[\w+/=-]+'|'sha(256|384|512)-[\w+/=-]+'|https?:\/\/[^\s]+|\*)$/;
+
+            for (const m of text.matchAll(/^\s+(Content-Security-Policy(?:-Report-Only)?):\s*(.+)$/gm)) {
+              const [, header, value] = m;
+              const dirs = value.split(";").map((s) => s.trim()).filter(Boolean);
+              const names = dirs.map((d) => d.split(/\s+/)[0]);
+              const dupes = [...new Set(names.filter((x, i) => names.indexOf(x) !== i))];
+              if (dupes.length) problems.push(`${header}: duplicate directive(s) ${dupes.join(", ")}`);
+              for (const d of dirs) {
+                const [name, ...sources] = d.split(/\s+/);
+                if (!KNOWN_DIRECTIVES.has(name)) {
+                  problems.push(`${header}: unknown directive "${name}"`);
+                }
+                for (const s of sources) {
+                  if (!SOURCE_OK.test(s)) {
+                    problems.push(`${header}: suspicious source "${s}" in ${name}`);
+                  }
+                }
+              }
+            }
+
             if (problems.length) {
               for (const p of problems) console.error(`✗ ${p}`);
               process.exit(1);
