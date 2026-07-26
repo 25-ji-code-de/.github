@@ -205,4 +205,63 @@ describe('内联 SDK 标记', () => {
     assert.equal(code, 1);
     assert.match(out, /未知的内联包 @someone\/not-ours/);
   });
+
+  test('CSS 里的块注释标记同样被识别', () => {
+    // 各前端开始 vendored sekai-design 的 token 之后，
+    // "复制粘贴之后没人知道什么时候开始不一样了"会原样搬到样式上
+    const { code, out } = check({
+      'css/sekai/contract.css': '/* @sekai-vendor @someone/not-ours@v1 tokens/contract.css */\n:root{}\n',
+    });
+    assert.equal(code, 1);
+    assert.match(out, /未知的内联包 @someone\/not-ours/);
+  });
+
+  test('sekai-design 在已知包列表里', () => {
+    // 不在的话，等各仓加上标记那天，四个用了这个 reusable workflow 的仓
+    // 会一起报"未知的内联包"—— 加标记的人多半不会想到要先改这里
+    const { out } = check({
+      'css/x.css': '/* @sekai-vendor @25-ji-code-de/sekai-design@v0.0.0-nonexistent tokens/contract.css */\n:root{}\n',
+    });
+    assert.doesNotMatch(out, /未知的内联包/, 'sekai-design 应当是已知包');
+    // tag 不存在 → 拉取失败，这说明它确实走到了联网比对那一步
+    assert.match(out, /无法拉取/);
+  });
+
+  test('没有标记的 CSS 不受影响', () => {
+    // 绝大多数 CSS 是本仓自己写的，不该因为扩到 .css 就被卷进来
+    const { code, out } = check({
+      'css/app.css': ':root { --x: 1px; }\n',
+      _headers: GOOD_HEADERS,
+    });
+    assert.equal(code, 0);
+    assert.match(out, /checked 0 vendored file\(s\)/);
+  });
+
+  test('CSS 标记必须独占一行 —— 行尾的注释不算', () => {
+    /*
+     * 关键在于正则的行锚点。写在规则行尾的注释不该把整个文件
+     * 变成"vendored 文件"—— 那会让本仓自己写的样式被拿去和上游比对。
+     *
+     * fixture 必须真的碰到锚点：`/*` 前面有内容、但紧跟着就是
+     * `@sekai-vendor`。第一版写的是 `/* 见 @sekai-vendor …`，
+     * 那个 `见` 字本身就让正则匹配不上，锚点根本没被测到 ——
+     * 去掉锚点测试照样全绿，是反向验证抓出来的。
+     */
+    const { code, out } = check({
+      'css/app.css':
+        ':root{} /* @sekai-vendor @25-ji-code-de/sekai-design@v1 tokens/contract.css */\n',
+      _headers: GOOD_HEADERS,
+    });
+    assert.equal(code, 0, out);
+    assert.match(out, /checked 0 vendored file\(s\)/);
+  });
+
+  test('文档性注释里提到 @sekai-vendor 也不算', () => {
+    const { code, out } = check({
+      'css/app.css': '/* 见 @sekai-vendor 机制的说明 */\n:root{}\n',
+      _headers: GOOD_HEADERS,
+    });
+    assert.equal(code, 0, out);
+    assert.match(out, /checked 0 vendored file\(s\)/);
+  });
 });

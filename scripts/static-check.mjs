@@ -73,19 +73,37 @@ function collect(extensions) {
   console.log(`validated ${files.length} JSON file(s), ${failed} failed`);
 }
 
-/* ── 3. 内联 SDK 与上游 tag 一致 ────────────────────────────── */
+/* ── 3. 内联的上游文件与 tag 一致 ──────────────────────────────
+ *
+ * `.js` 与 `.css` 都扫。CSS 是后加的：各前端开始 vendored
+ * sekai-design 的 token 之后，"复制粘贴之后没人知道什么时候开始
+ * 不一样了"这个老问题会原样搬到样式上 —— hub 的 :root 就是从
+ * sekai-pass 抄来的，两边的 --error-color 已经分成 `#e57373` 和
+ * `229 115 115` 两种拼写，谁都没发现。
+ *
+ * 两种注释语法各认各的：JS 用行注释起头的 `@sekai-vendor …`，
+ * CSS 用块注释包住的同一行内容。具体形状见下面两个正则。
+ */
 {
-  const MARKER = /^\/\/\s*@sekai-vendor\s+(\S+)@(\S+)\s+(\S+)\s*$/m;
+  const MARKERS = [
+    /^\/\/\s*@sekai-vendor\s+(\S+)@(\S+)\s+(\S+)\s*$/m,
+    /^\/\*\s*@sekai-vendor\s+(\S+)@(\S+)\s+(\S+)\s*\*\/\s*$/m,
+  ];
   const REPO_BY_PKG = {
     '@25-ji-code-de/sekai-auth': '25-ji-code-de/sekai-auth',
     '@25-ji-code-de/sekai-worker-kit': '25-ji-code-de/sekai-worker-kit',
+    '@25-ji-code-de/sekai-design': '25-ji-code-de/sekai-design',
   };
   const normalize = (s) => s.replace(/\r\n/g, '\n').trimEnd();
 
   let checked = 0;
-  for (const file of collect(['.js'])) {
+  for (const file of collect(['.js', '.css'])) {
     const content = readFileSync(file, 'utf8');
-    const match = content.match(MARKER);
+    let match = null;
+    for (const m of MARKERS) {
+      match = content.match(m);
+      if (match) break;
+    }
     if (!match) continue;
 
     checked += 1;
