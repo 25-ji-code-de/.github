@@ -1,0 +1,204 @@
+/*
+ * Copyright 2026 The 25-ji-code-de Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/**
+ * 静态站与纯 JS Worker 仓的通用检查。
+ *
+ * 之前这些逻辑内联在 workflow 的 `node -e '...'` 里，结果被 bash 的单引号
+ * 字符串坑了一次 —— CSP 校验的正则含字面 `'self'`，直接把 bash 字符串截断，
+ * 报 "syntax error near unexpected token". 挪成文件后不再有转义问题。
+ *
+ * 用法：node static-check.mjs <repo-root> [ignore-regex]
+ */
+
+import { readdirSync, statSync, readFileSync, existsSync } from 'node:fs';
+import { join } from 'node:path';
+import { execFileSync } from 'node:child_process';
+import { argv, env } from 'node:process';
+
+const root = argv[2] || '.';
+const ignore = new RegExp(
+  argv[3] || 'node_modules|[\\\\/]libs[\\\\/]|\\.min\\.js$|package-lock\\.json$',
+);
+
+/** checkout 共享脚本用的目录，不参与扫描。 */
+const META_DIR = '_sekai_meta';
+
+const problems = [];
+const fail = (msg) => problems.push(msg);
+
+function collect(extensions) {
+  const out = [];
+  (function walk(dir) {
+    for (const entry of readdirSync(dir)) {
+      if (entry === '.git' || entry === META_DIR) continue;
+      const full = join(dir, entry);
+      if (ignore.test(full)) continue;
+      if (statSync(full).isDirectory()) walk(full);
+      else if (extensions.some((e) => full.endsWith(e))) out.push(full);
+    }
+  })(root);
+  return out;
+}
+
+/* ── 1. JavaScript 语法 ─────────────────────────────────────── */
+{
+  const files = collect(['.js', '.mjs']);
+  let failed = 0;
+  for (const file of files) {
+    try {
+      execFileSync(process.execPath, ['--check', file], { stdio: 'pipe' });
+    } catch (err) {
+      failed += 1;
+      fail(`${file}: JavaScript 语法错误\n${String(err.stderr).trim().split('\n')[0]}`);
+    }
+  }
+  console.log(`checked ${files.length} JavaScript file(s), ${failed} failed`);
+}
+
+/* ── 2. JSON 合法性 ─────────────────────────────────────────── */
+{
+  const files = collect(['.json']);
+  let failed = 0;
+  for (const file of files) {
+    try {
+      JSON.parse(readFileSync(file, 'utf8'));
+    } catch (err) {
+      failed += 1;
+      fail(`${file}: ${err.message}`);
+    }
+  }
+  console.log(`validated ${files.length} JSON file(s), ${failed} failed`);
+}
+
+/* ── 3. 内联 SDK 与上游 tag 一致 ────────────────────────────── */
+{
+  const MARKER = /^\/\/\s*@sekai-vendor\s+(\S+)@(\S+)\s+(\S+)\s*$/m;
+  const REPO_BY_PKG = {
+    '@25-ji-code-de/sekai-auth': '25-ji-code-de/sekai-auth',
+    '@25-ji-code-de/sekai-worker-kit': '25-ji-code-de/sekai-worker-kit',
+  };
+  const normalize = (s) => s.replace(/\r\n/g, '\n').trimEnd();
+
+  let checked = 0;
+  for (const file of collect(['.js'])) {
+    const content = readFileSync(file, 'utf8');
+    const match = content.match(MARKER);
+    if (!match) continue;
+
+    checked += 1;
+    const [, pkg, tag, path] = match;
+    const repo = REPO_BY_PKG[pkg];
+    if (!repo) {
+      fail(`${file}: 未知的内联包 ${pkg}`);
+      continue;
+    }
+
+    const url = `https://raw.githubusercontent.com/${repo}/${tag}/${path}`;
+    const response = await fetch(url);
+    if (!response.ok) {
+      fail(`${file}: 无法拉取 ${url}（HTTP ${response.status}）`);
+      continue;
+    }
+    if (normalize(content).endsWith(normalize(await response.text()))) {
+      console.log(`✓ ${file} matches ${pkg}@${tag}`);
+    } else {
+      fail(`${file}: 与 ${pkg}@${tag} 不一致\n    上游：${url}`);
+    }
+  }
+  console.log(`checked ${checked} vendored file(s)`);
+}
+
+/* ── 4. Cloudflare Pages _headers ───────────────────────────── */
+{
+  const headersPath = join(root, '_headers');
+  if (!existsSync(headersPath)) {
+    console.log('no _headers file — skipping');
+  } else {
+    let raw = readFileSync(headersPath, 'utf8');
+
+    // BOM 会让第一条路径规则看起来是缩进的，Pages 侧同样会解析失败
+    if (raw.charCodeAt(0) === 0xfeff) {
+      fail('_headers: 文件带 UTF-8 BOM，必须是无 BOM 的纯 UTF-8');
+      raw = raw.slice(1);
+    }
+
+    const lines = raw.split(/\r?\n/);
+    const seen = new Map();
+    let rule = null;
+
+    lines.forEach((line, i) => {
+      const n = i + 1;
+      if (!line.trim() || line.trimStart().startsWith('#')) return;
+      if (!/^\s/.test(line)) {
+        rule = line.trim();
+        // 同一路径出现多个块，行为依赖 Pages 的合并语义 —— 曾经踩过
+        if (seen.has(rule)) {
+          fail(`_headers:${n}: 路径规则 "${rule}" 重复（首次出现在第 ${seen.get(rule)} 行），应合并为一个块`);
+        }
+        seen.set(rule, n);
+        return;
+      }
+      if (!rule) {
+        fail(`_headers:${n}: 头部行出现在任何路径规则之前`);
+        return;
+      }
+      if (!/^\s+[A-Za-z0-9-]+:\s*.+$/.test(line)) {
+        fail(`_headers:${n}: 头部行格式错误：${line.trim()}`);
+      }
+    });
+
+    for (const header of [
+      'X-Content-Type-Options',
+      'Referrer-Policy',
+      'X-Frame-Options',
+      'Permissions-Policy',
+    ]) {
+      if (!raw.includes(header)) fail(`_headers: 缺少必需的安全头 ${header}`);
+    }
+
+    // CSP 写错不会报错，只会静默失效（或更糟：静默拦掉正常资源）
+    const KNOWN_DIRECTIVES = new Set([
+      'default-src', 'script-src', 'style-src', 'img-src', 'font-src', 'media-src',
+      'connect-src', 'object-src', 'frame-src', 'worker-src', 'manifest-src',
+      'base-uri', 'form-action', 'frame-ancestors', 'report-uri', 'report-to',
+      'upgrade-insecure-requests', 'block-all-mixed-content',
+    ]);
+    const SOURCE_OK =
+      /^('self'|'none'|'unsafe-inline'|'unsafe-eval'|'strict-dynamic'|data:|blob:|https:|wss:|'nonce-[\w+/=-]+'|'sha(256|384|512)-[\w+/=-]+'|https?:\/\/[^\s]+|\*)$/;
+
+    for (const m of raw.matchAll(/^\s+(Content-Security-Policy(?:-Report-Only)?):\s*(.+)$/gm)) {
+      const [, header, value] = m;
+      const dirs = value.split(';').map((s) => s.trim()).filter(Boolean);
+      const names = dirs.map((d) => d.split(/\s+/)[0]);
+      const dupes = [...new Set(names.filter((x, i) => names.indexOf(x) !== i))];
+      if (dupes.length) fail(`${header}: 重复指令 ${dupes.join(', ')}`);
+      for (const d of dirs) {
+        const [name, ...sources] = d.split(/\s+/);
+        if (!KNOWN_DIRECTIVES.has(name)) fail(`${header}: 未知指令 "${name}"`);
+        for (const s of sources) {
+          if (!SOURCE_OK.test(s)) fail(`${header}: ${name} 里有可疑来源 "${s}"`);
+        }
+      }
+    }
+
+    console.log(`_headers: ${seen.size} 条路径规则，安全头齐全`);
+  }
+}
+
+/* ── 输出 ───────────────────────────────────────────────────── */
+if (problems.length) {
+  console.log('');
+  for (const p of problems) console.error(`✗ ${p}`);
+  console.log(`\n共 ${problems.length} 处问题。`);
+  if (env.GITHUB_STEP_SUMMARY) {
+    // 与 check-consistency.mjs 一致：结果也写进 job summary
+    console.log('::error::static-check 发现问题，详见上方日志');
+  }
+  process.exitCode = 1;
+} else {
+  console.log('\nstatic-check 全部通过。');
+  process.exitCode = 0;
+}

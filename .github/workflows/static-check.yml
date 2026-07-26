@@ -10,6 +10,10 @@ name: Static Check
 #
 # 之所以做成可复用而不是各仓复制一份：生态里已经因为复制粘贴产生过
 # 四份漂移的 auth 客户端，CI 不要重蹈覆辙。
+#
+# 检查逻辑在 scripts/static-check.mjs，不内联在这里 —— 内联进
+# `node -e '...'` 曾经被 bash 单引号坑过一次（CSP 校验的正则含 'self'，
+# 直接把 bash 字符串截断）。
 
 on:
   workflow_call:
@@ -27,230 +31,18 @@ jobs:
   static-check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repo under test
+        uses: actions/checkout@v4
+
+      - name: Checkout shared scripts
+        uses: actions/checkout@v4
+        with:
+          repository: 25-ji-code-de/.github
+          path: _sekai_meta
 
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ inputs.node-version }}
 
-      - name: Syntax-check JavaScript
-        env:
-          IGNORE_PATTERN: ${{ inputs.ignore-pattern }}
-        run: |
-          node --input-type=module -e '
-            import { readdirSync, statSync } from "node:fs";
-            import { join } from "node:path";
-            import { execFileSync } from "node:child_process";
-
-            const ignore = new RegExp(process.env.IGNORE_PATTERN);
-            const files = [];
-            (function walk(dir) {
-              for (const entry of readdirSync(dir)) {
-                if (entry === ".git") continue;
-                const full = join(dir, entry);
-                if (ignore.test(full)) continue;
-                if (statSync(full).isDirectory()) walk(full);
-                else if (full.endsWith(".js") || full.endsWith(".mjs")) files.push(full);
-              }
-            })(".");
-
-            let failed = 0;
-            for (const file of files) {
-              try {
-                execFileSync(process.execPath, ["--check", file], { stdio: "pipe" });
-              } catch (err) {
-                failed += 1;
-                console.error(`✗ ${file}`);
-                console.error(String(err.stderr).trim());
-              }
-            }
-            console.log(`checked ${files.length} JavaScript file(s), ${failed} failed`);
-            if (failed) process.exit(1);
-          '
-
-      - name: Validate JSON
-        env:
-          IGNORE_PATTERN: ${{ inputs.ignore-pattern }}
-        run: |
-          node --input-type=module -e '
-            import { readdirSync, statSync, readFileSync } from "node:fs";
-            import { join } from "node:path";
-
-            const ignore = new RegExp(process.env.IGNORE_PATTERN);
-            const files = [];
-            (function walk(dir) {
-              for (const entry of readdirSync(dir)) {
-                if (entry === ".git") continue;
-                const full = join(dir, entry);
-                if (ignore.test(full)) continue;
-                if (statSync(full).isDirectory()) walk(full);
-                else if (full.endsWith(".json")) files.push(full);
-              }
-            })(".");
-
-            let failed = 0;
-            for (const file of files) {
-              try {
-                JSON.parse(readFileSync(file, "utf8"));
-              } catch (err) {
-                failed += 1;
-                console.error(`✗ ${file}: ${err.message}`);
-              }
-            }
-            console.log(`validated ${files.length} JSON file(s), ${failed} failed`);
-            if (failed) process.exit(1);
-          '
-
-      - name: Check vendored files match upstream
-        run: |
-          node --input-type=module -e '
-            import { readdirSync, statSync, readFileSync } from "node:fs";
-            import { join } from "node:path";
-
-            // 无构建步骤的静态站只能内联引用 SDK。带 @sekai-vendor 头的文件
-            // 会在这里跟上游 tag 逐字比对，防止有人就地改了内联副本。
-            //   // @sekai-vendor <pkg>@<tag> <path-in-upstream-repo>
-            const MARKER = /^\/\/\s*@sekai-vendor\s+(\S+)@(\S+)\s+(\S+)\s*$/m;
-
-            const REPO_BY_PKG = {
-              "@25-ji-code-de/sekai-auth": "25-ji-code-de/sekai-auth",
-              "@25-ji-code-de/sekai-worker-kit": "25-ji-code-de/sekai-worker-kit",
-            };
-
-            const files = [];
-            (function walk(dir) {
-              for (const entry of readdirSync(dir)) {
-                if (entry === ".git" || entry === "node_modules") continue;
-                const full = join(dir, entry);
-                if (statSync(full).isDirectory()) walk(full);
-                else if (full.endsWith(".js")) files.push(full);
-              }
-            })(".");
-
-            const normalize = (s) => s.replace(/\r\n/g, "\n").trimEnd();
-            let checked = 0;
-            let failed = 0;
-
-            for (const file of files) {
-              const content = readFileSync(file, "utf8");
-              const match = content.match(MARKER);
-              if (!match) continue;
-
-              checked += 1;
-              const [, pkg, tag, path] = match;
-              const repo = REPO_BY_PKG[pkg];
-              if (!repo) {
-                console.error(`✗ ${file}: unknown vendored package ${pkg}`);
-                failed += 1;
-                continue;
-              }
-
-              const url = `https://raw.githubusercontent.com/${repo}/${tag}/${path}`;
-              const response = await fetch(url);
-              if (!response.ok) {
-                console.error(`✗ ${file}: cannot fetch ${url} (HTTP ${response.status})`);
-                failed += 1;
-                continue;
-              }
-
-              // 内联副本 = 本地说明头 + 上游原文，所以只要求以上游内容结尾
-              if (normalize(content).endsWith(normalize(await response.text()))) {
-                console.log(`✓ ${file} matches ${pkg}@${tag}`);
-              } else {
-                console.error(`✗ ${file} drifted from ${pkg}@${tag}`);
-                console.error(`    upstream: ${url}`);
-                failed += 1;
-              }
-            }
-
-            console.log(`checked ${checked} vendored file(s), ${failed} failed`);
-            // 用 exitCode 而不是 process.exit()：fetch 之后立刻硬退出会让
-            // undici 的 keep-alive socket 触发 libuv 断言崩溃
-            process.exitCode = failed ? 1 : 0;
-          '
-
-      - name: Check Cloudflare Pages _headers
-        run: |
-          node --input-type=module -e '
-            import { existsSync, readFileSync } from "node:fs";
-
-            if (!existsSync("_headers")) {
-              console.log("no _headers file — skipping");
-              process.exit(0);
-            }
-
-            let raw = readFileSync("_headers", "utf8");
-            const problems = [];
-
-            // BOM 会让第一条路径规则看起来是缩进的，Pages 侧同样会解析失败
-            if (raw.charCodeAt(0) === 0xfeff) {
-              problems.push("file starts with a UTF-8 BOM; _headers must be plain UTF-8 without BOM");
-              raw = raw.slice(1);
-            }
-
-            const lines = raw.split(/\r?\n/);
-            const seen = new Map();
-            let rule = null;
-
-            lines.forEach((line, i) => {
-              const n = i + 1;
-              if (!line.trim() || line.trimStart().startsWith("#")) return;
-              if (!/^\s/.test(line)) {
-                rule = line.trim();
-                // 同一路径出现多个块，行为依赖 Pages 的合并语义 —— 曾经踩过
-                if (seen.has(rule)) {
-                  problems.push(`line ${n}: duplicate rule "${rule}" (first seen on line ${seen.get(rule)}); merge them into one block`);
-                }
-                seen.set(rule, n);
-                return;
-              }
-              if (!rule) {
-                problems.push(`line ${n}: header line before any path rule`);
-                return;
-              }
-              if (!/^\s+[A-Za-z0-9-]+:\s*.+$/.test(line)) {
-                problems.push(`line ${n}: malformed header line: ${line.trim()}`);
-              }
-            });
-
-            const required = ["X-Content-Type-Options", "Referrer-Policy", "X-Frame-Options", "Permissions-Policy"];
-            const text = lines.join("\n");
-            for (const header of required) {
-              if (!text.includes(header)) problems.push(`missing required security header: ${header}`);
-            }
-
-            // CSP 写错不会报错，只会静默失效（或更糟：静默拦掉正常资源）。
-            // 这里做基本的语法校验。
-            const KNOWN_DIRECTIVES = new Set([
-              "default-src", "script-src", "style-src", "img-src", "font-src", "media-src",
-              "connect-src", "object-src", "frame-src", "worker-src", "manifest-src",
-              "base-uri", "form-action", "frame-ancestors", "report-uri", "report-to",
-              "upgrade-insecure-requests", "block-all-mixed-content",
-            ]);
-            const SOURCE_OK = /^('self'|'none'|'unsafe-inline'|'unsafe-eval'|'strict-dynamic'|data:|blob:|https:|wss:|'nonce-[\w+/=-]+'|'sha(256|384|512)-[\w+/=-]+'|https?:\/\/[^\s]+|\*)$/;
-
-            for (const m of text.matchAll(/^\s+(Content-Security-Policy(?:-Report-Only)?):\s*(.+)$/gm)) {
-              const [, header, value] = m;
-              const dirs = value.split(";").map((s) => s.trim()).filter(Boolean);
-              const names = dirs.map((d) => d.split(/\s+/)[0]);
-              const dupes = [...new Set(names.filter((x, i) => names.indexOf(x) !== i))];
-              if (dupes.length) problems.push(`${header}: duplicate directive(s) ${dupes.join(", ")}`);
-              for (const d of dirs) {
-                const [name, ...sources] = d.split(/\s+/);
-                if (!KNOWN_DIRECTIVES.has(name)) {
-                  problems.push(`${header}: unknown directive "${name}"`);
-                }
-                for (const s of sources) {
-                  if (!SOURCE_OK.test(s)) {
-                    problems.push(`${header}: suspicious source "${s}" in ${name}`);
-                  }
-                }
-              }
-            }
-
-            if (problems.length) {
-              for (const p of problems) console.error(`✗ ${p}`);
-              process.exit(1);
-            }
-            console.log(`_headers OK — ${seen.size} rule(s), all required security headers present`);
-          '
+      - name: Run static checks
+        run: node _sekai_meta/scripts/static-check.mjs . '${{ inputs.ignore-pattern }}'
