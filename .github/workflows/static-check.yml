@@ -101,6 +101,74 @@ jobs:
             if (failed) process.exit(1);
           '
 
+      - name: Check vendored files match upstream
+        run: |
+          node --input-type=module -e '
+            import { readdirSync, statSync, readFileSync } from "node:fs";
+            import { join } from "node:path";
+
+            // 无构建步骤的静态站只能内联引用 SDK。带 @sekai-vendor 头的文件
+            // 会在这里跟上游 tag 逐字比对，防止有人就地改了内联副本。
+            //   // @sekai-vendor <pkg>@<tag> <path-in-upstream-repo>
+            const MARKER = /^\/\/\s*@sekai-vendor\s+(\S+)@(\S+)\s+(\S+)\s*$/m;
+
+            const REPO_BY_PKG = {
+              "@25-ji-code-de/sekai-auth": "25-ji-code-de/sekai-auth",
+              "@25-ji-code-de/sekai-worker-kit": "25-ji-code-de/sekai-worker-kit",
+            };
+
+            const files = [];
+            (function walk(dir) {
+              for (const entry of readdirSync(dir)) {
+                if (entry === ".git" || entry === "node_modules") continue;
+                const full = join(dir, entry);
+                if (statSync(full).isDirectory()) walk(full);
+                else if (full.endsWith(".js")) files.push(full);
+              }
+            })(".");
+
+            const normalize = (s) => s.replace(/\r\n/g, "\n").trimEnd();
+            let checked = 0;
+            let failed = 0;
+
+            for (const file of files) {
+              const content = readFileSync(file, "utf8");
+              const match = content.match(MARKER);
+              if (!match) continue;
+
+              checked += 1;
+              const [, pkg, tag, path] = match;
+              const repo = REPO_BY_PKG[pkg];
+              if (!repo) {
+                console.error(`✗ ${file}: unknown vendored package ${pkg}`);
+                failed += 1;
+                continue;
+              }
+
+              const url = `https://raw.githubusercontent.com/${repo}/${tag}/${path}`;
+              const response = await fetch(url);
+              if (!response.ok) {
+                console.error(`✗ ${file}: cannot fetch ${url} (HTTP ${response.status})`);
+                failed += 1;
+                continue;
+              }
+
+              // 内联副本 = 本地说明头 + 上游原文，所以只要求以上游内容结尾
+              if (normalize(content).endsWith(normalize(await response.text()))) {
+                console.log(`✓ ${file} matches ${pkg}@${tag}`);
+              } else {
+                console.error(`✗ ${file} drifted from ${pkg}@${tag}`);
+                console.error(`    upstream: ${url}`);
+                failed += 1;
+              }
+            }
+
+            console.log(`checked ${checked} vendored file(s), ${failed} failed`);
+            // 用 exitCode 而不是 process.exit()：fetch 之后立刻硬退出会让
+            // undici 的 keep-alive socket 触发 libuv 断言崩溃
+            process.exitCode = failed ? 1 : 0;
+          '
+
       - name: Check Cloudflare Pages _headers
         run: |
           node --input-type=module -e '
