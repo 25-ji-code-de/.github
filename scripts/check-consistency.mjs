@@ -9,7 +9,7 @@
  * 单仓 CI 只能看见自己那一份，看不见"我和别人不一样"。这个脚本把全部仓
  * 拉到一起比对那些**必须一致、但没有任何单仓机制能保证一致**的东西。
  *
- * 生态里已经因为缺这层检查踩过：四份漂移的 auth 客户端、三种互不兼容的
+ * 生态里已经因为缺这层检查踩过：五份漂移的 auth 客户端、三种互不兼容的
  * 错误信封、跨越两年的 compatibility_date、指向旧账号的 repository 字段。
  *
  * 用法：
@@ -27,10 +27,14 @@ const root = argv[2] || '.';
 /**
  * 不参与一致性约束的仓。
  *
- * puzzle-sekai 是独立演进的应用（Capacitor + yarn + flat eslint config），
- * 与生态其余部分刻意不共享工具链约定，维护者明确要求不要按统一标准去改它。
+ * 现在是空的。puzzle-sekai 曾经在这里 —— 那时维护者要求不要动它，
+ * 后来解除了。**这个豁免掩盖了一个真问题**：它是生态里第五份独立的
+ * auth 客户端实现，而排除在外意味着检查器从来没数到它。
+ *
+ * 所以往这里加仓要慎重：被排除的仓不是"没问题"，只是"看不见"。
+ * 真要豁免，优先在**具体某一项检查**里跳过，而不是整仓排除。
  */
-const EXCLUDED = new Set(['puzzle-sekai']);
+const EXCLUDED = new Set();
 
 /** 静态站点仓（无构建步骤，应有 _headers）。 */
 const STATIC_SITES = ['hub', 'nightcord', 'stickers', '25ji-sagyo'];
@@ -51,10 +55,25 @@ function note(msg) {
   notes.push(msg);
 }
 
+/*
+ * 只有含 .git 的目录才算一个仓库的检出。
+ *
+ * 早先这里是"根目录下的任意子目录"，于是本地检出根里随便一个临时目录
+ * 都会被当成仓库，然后报一堆"缺少社区文件"的假阳性。CI 里因为是逐仓
+ * checkout 所以看不出来，本地跑就会踩到 —— 而本地跑恰恰是这个脚本
+ * 最该好用的场景。
+ */
 const repos = readdirSync(root).filter((name) => {
   const p = join(root, name);
-  return !name.startsWith('.') && !EXCLUDED.has(name) && statSync(p).isDirectory();
+  if (name.startsWith('.') || EXCLUDED.has(name)) return false;
+  if (!statSync(p).isDirectory()) return false;
+  return existsSync(join(p, '.git'));
 });
+
+if (!repos.length) {
+  console.error(`${root} 下没有找到任何仓库检出（判据：子目录含 .git）`);
+  process.exit(1);
+}
 
 function read(repo, file) {
   const p = join(root, repo, file);
@@ -182,19 +201,53 @@ function requireConsistent(label, entries, { allowMissing = true } = {}) {
   requireConsistent('wrangler compatibility_date', entries);
 }
 
-/* ── 5. package.json 的 author 与 repository owner ───────────── */
+/* ── 5. package.json 的 author / repository / license ─────────
+ *
+ * repository 缺失不只是元数据不全：`npm view`、GitHub 的包关联、以及
+ * 生态内 `github:` 形式的依赖解析都靠它。author 缺失则让"这是谁的东西"
+ * 在不同仓给出不同答案。
+ */
 {
   const authors = [];
   for (const repo of repos) {
     const pkg = readJson(repo, 'package.json');
     if (!pkg) continue;
+
     if (pkg.author) authors.push([repo, pkg.author]);
+    else fail(`${repo}/package.json: 缺少 author`);
 
     const url = pkg.repository?.url ?? pkg.repository;
-    if (typeof url === 'string') {
+    if (typeof url !== 'string') {
+      fail(`${repo}/package.json: 缺少 repository`);
+    } else {
       const m = url.match(/github\.com[/:]([^/]+)\//);
       if (m && m[1] !== '25-ji-code-de') {
         fail(`${repo}/package.json: repository 指向 ${m[1]}，应为 25-ji-code-de`);
+      }
+      if (!url.startsWith('git+')) {
+        fail(`${repo}/package.json: repository.url 应以 git+ 开头 — 当前 ${url}`);
+      }
+    }
+
+    // license 字段与 LICENSE 正文必须说的是同一件事。
+    // 生态内各仓的授权本就不同（应用 AGPL、SDK Apache、docs CC-BY），
+    // 这里不要求跨仓一致，只要求**同一个仓内部**不自相矛盾。
+    const licenseText = read(repo, 'LICENSE');
+    if (licenseText) {
+      const expect = /GNU AFFERO/i.test(licenseText)
+        ? 'AGPL-3.0-only'
+        : /Apache License/i.test(licenseText)
+          ? 'Apache-2.0'
+          : /^MIT License/im.test(licenseText)
+            ? 'MIT'
+            : /Creative Commons Attribution 4\.0/i.test(licenseText)
+              ? 'CC-BY-4.0'
+              : null;
+      if (expect && pkg.license !== expect) {
+        fail(
+          `${repo}/package.json: license 字段为 ${JSON.stringify(pkg.license ?? null)}，` +
+            `但 LICENSE 正文是 ${expect}`,
+        );
       }
     }
   }
