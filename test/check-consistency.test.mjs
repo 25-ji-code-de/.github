@@ -30,7 +30,8 @@ function check(files) {
 
 describe('仓库发现', () => {
   test('只把含 .git 的目录当仓库', () => {
-    // sekai-design 这种没有 .git 的散目录不该被当成仓库报"缺社区文件"
+    // 检出根里没有 .git 的散目录（半克隆、临时导出、正在初始化的新仓）
+    // 不该被当成仓库报"缺社区文件"
     const { out } = check({
       ...goodRepo('real'),
       'stray/tokens/primitives.css': ':root{}\n',
