@@ -256,7 +256,57 @@ function collect(extensions) {
   console.log(`scanned ${scanned} source file(s) for control chars, ${hits} found`);
 }
 
-/* ── 5. Cloudflare Pages _headers ───────────────────────────── */
+/* ── 5. 有测试就得在 CI 里跑 ───────────────────────────────────
+ *
+ * 缘起：hub 与 25ji-sagyo 的 ci.yml 只调了共享的 static-check 工作流，
+ * 而那个查的是**跨仓一致性**，不是本仓的测试。于是它们各自的测试文件
+ * 一次都没在 CI 里跑过 —— 测试不跑就是装饰，而且是**看起来有保障**的装饰，
+ * 比没有更糟。
+ *
+ * 判据刻意宽松：只要有任何一个 workflow 提到了跑测试的命令就算数。
+ * 这里要防的是「压根没接」，不是「接得漂亮」。
+ *
+ * 我手工查过一轮全生态，但手工结论会过期 —— 所以做成检查。
+ * （那次手工查还犯了两个错：模式里漏了 `yarn test` 导致误报 puzzle-sekai；
+ *   以及读「当前检出的分支」而不是 main，导致误判 hub 与 25ji-sagyo。
+ *   做成 per-repo 的 CI 检查之后这两个问题都不存在了 —— 它跑在被检查的
+ *   那个仓的那次 checkout 上。）
+ */
+{
+  const TEST_FILE = /(^|[\\/])(test|tests|__tests__)[\\/]|\.(test|spec)\.[cm]?[jt]sx?$/;
+  const RUNS_TESTS =
+    /\b(npm|yarn|pnpm|bun)\s+(run\s+)?test\b|node\s+--test|cargo\s+test|vitest|jest|playwright\s+test|deno\s+test/;
+
+  const testFiles = collect(['.js', '.mjs', '.cjs', '.ts', '.mts', '.tsx', '.rs', '.py'])
+    .filter((f) => TEST_FILE.test(f));
+
+  if (testFiles.length === 0) {
+    console.log('no test files — skipping CI-runs-tests check');
+  } else {
+    const wfDir = join(root, '.github', 'workflows');
+    let workflows = [];
+    if (existsSync(wfDir)) {
+      workflows = readdirSync(wfDir)
+        .filter((f) => f.endsWith('.yml') || f.endsWith('.yaml'))
+        .map((f) => join(wfDir, f));
+    }
+
+    const runner = workflows.find((w) => RUNS_TESTS.test(readFileSync(w, 'utf8')));
+
+    if (runner) {
+      console.log(
+        `${testFiles.length} 个测试文件，CI 有跑（${runner.replace(/.*[\\/]/, '')}）`,
+      );
+    } else {
+      fail(
+        `本仓有 ${testFiles.length} 个测试文件，但 .github/workflows 里没有任何作业在跑它们 —— ` +
+          '测试不跑就是装饰。加一个 test 作业，或者删掉这些文件。',
+      );
+    }
+  }
+}
+
+/* ── 6. Cloudflare Pages _headers ───────────────────────────── */
 {
   const headersPath = join(root, '_headers');
   if (!existsSync(headersPath)) {

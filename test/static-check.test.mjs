@@ -422,3 +422,138 @@ describe('内联 SDK 标记', () => {
     assert.match(out, /checked 0 vendored file\(s\)/);
   });
 });
+
+describe('有测试就得在 CI 里跑', () => {
+  /*
+   * 缘起：hub 与 25ji-sagyo 的 ci.yml 只调了共享的 static-check 工作流，
+   * 而那个查的是跨仓一致性，不是本仓的测试。于是它们各自的测试文件一次都
+   * 没在 CI 里跑过 —— 测试不跑就是装饰，而且是**看起来有保障**的装饰。
+   *
+   * 我手工查过一轮全生态，但那次犯了两个错：模式里漏了 `yarn test`
+   * 导致误报 puzzle-sekai；以及读「当前检出的分支」而不是 main，
+   * 导致误判。做成 per-repo 的 CI 检查之后这两个问题都不存在了 ——
+   * 它跑在被检查的那个仓的那次 checkout 上。
+   */
+  const WF = '.github/workflows/ci.yml';
+
+  test('没有测试文件 —— 跳过', () => {
+    const { code, out } = check({ 'src/a.js': 'export const a = 1;\n', _headers: GOOD_HEADERS });
+    assert.equal(code, 0, out);
+    assert.match(out, /no test files/);
+  });
+
+  test('有测试但没有 workflows 目录 —— 报错', () => {
+    const { code, out } = check({
+      'test/a.test.mjs': 'export const t = 1;\n',
+      _headers: GOOD_HEADERS,
+    });
+    assert.equal(code, 1);
+    assert.match(out, /没有任何作业在跑它们/);
+  });
+
+  test('有测试、workflow 存在但不跑测试 —— 报错', () => {
+    const { code, out } = check({
+      'test/a.test.mjs': 'export const t = 1;\n',
+      [WF]: 'name: CI\njobs:\n  check:\n    uses: org/.github/.github/workflows/static-check.yml@main\n',
+      _headers: GOOD_HEADERS,
+    });
+    assert.equal(code, 1);
+    assert.match(out, /1 个测试文件/);
+  });
+
+  for (const cmd of [
+    'npm test',
+    'npm run test',
+    'yarn test',
+    'pnpm test',
+    'bun test',
+    'node --test "test/*.test.mjs"',
+    'npx vitest run',
+    'npx jest',
+    'cargo test',
+    'deno test',
+  ]) {
+    test(`workflow 里写 \`${cmd}\` —— 通过`, () => {
+      const { code, out } = check({
+        'test/a.test.mjs': 'export const t = 1;\n',
+        [WF]: `name: CI\njobs:\n  test:\n    steps:\n      - run: ${cmd}\n`,
+        _headers: GOOD_HEADERS,
+      });
+      assert.equal(code, 0, out);
+      assert.match(out, /CI 有跑/);
+    });
+  }
+
+  test('像跑测试但不是的命令 —— 不算', () => {
+    /*
+     * `test\b` 里那个词边界是有意的：`npm run test-e2e` 算跑测试，
+     * `npm run testfoo`、`npm run pretest` 不算。
+     *
+     * 这条是反向验证补出来的 —— 把 `test\b` 放宽成 `test` 之后，
+     * 原有用例一条都没红，说明这个边界根本没被覆盖。
+     */
+    for (const cmd of ['npm run testfoo', 'npm run pretest', 'npm run latest']) {
+      const { code, out } = check({
+        'test/a.test.mjs': 'export const t = 1;\n',
+        [WF]: `name: CI\njobs:\n  x:\n    steps:\n      - run: ${cmd}\n`,
+        _headers: GOOD_HEADERS,
+      });
+      assert.equal(code, 1, `"${cmd}" 被当成了跑测试：${out}`);
+    }
+  });
+
+  test('npm run test-e2e 这种带后缀的算跑测试', () => {
+    const { code, out } = check({
+      'test/a.test.mjs': 'export const t = 1;\n',
+      [WF]: 'name: CI\njobs:\n  x:\n    steps:\n      - run: npm run test-e2e\n',
+      _headers: GOOD_HEADERS,
+    });
+    assert.equal(code, 0, out);
+  });
+
+  test('测试文件按目录识别（test/ 下的任意 js）', () => {
+    const { code } = check({
+      'test/helpers.mjs': 'export const h = 1;\n',
+      _headers: GOOD_HEADERS,
+    });
+    assert.equal(code, 1, 'test/ 目录下的文件应当算测试文件');
+  });
+
+  test('测试文件按后缀识别（src 里的 *.test.ts）', () => {
+    const { code } = check({
+      'src/a.test.ts': 'export const t = 1;\n',
+      _headers: GOOD_HEADERS,
+    });
+    assert.equal(code, 1);
+  });
+
+  test('名字里带 test 但不是测试文件 —— 不算', () => {
+    // `latest.js`、`contest.ts` 这种不该触发
+    const { code, out } = check({
+      'src/latest.js': 'export const v = 1;\n',
+      'src/contest.ts': 'export const c = 1;\n',
+      _headers: GOOD_HEADERS,
+    });
+    assert.equal(code, 0, out);
+    assert.match(out, /no test files/);
+  });
+
+  test('.yaml 后缀的 workflow 也认', () => {
+    const { code, out } = check({
+      'test/a.test.mjs': 'export const t = 1;\n',
+      '.github/workflows/ci.yaml': 'jobs:\n  test:\n    steps:\n      - run: npm test\n',
+      _headers: GOOD_HEADERS,
+    });
+    assert.equal(code, 0, out);
+  });
+
+  test('多个 workflow 里只要有一个跑测试就算', () => {
+    const { code, out } = check({
+      'test/a.test.mjs': 'export const t = 1;\n',
+      '.github/workflows/lint.yml': 'jobs:\n  lint:\n    steps:\n      - run: npm run lint\n',
+      '.github/workflows/ci.yml': 'jobs:\n  test:\n    steps:\n      - run: npm test\n',
+      _headers: GOOD_HEADERS,
+    });
+    assert.equal(code, 0, out);
+  });
+});
