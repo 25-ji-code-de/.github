@@ -236,7 +236,56 @@ function requireConsistent(label, entries, { allowMissing = true } = {}) {
   requireConsistent('静态站 X-Frame-Options', frameOptions);
 }
 
-/* ── 8. Worker 仓是否有测试 ─────────────────────────────────── */
+/* ── 8. lockfile ─────────────────────────────────────────────
+ *
+ * sekai-pass 曾把 package-lock.json 写进 .gitignore，导致
+ * actions/setup-node 的 `cache: npm` 在 CI 里直接失败（"lock file is not
+ * found"），而且失败发生在 setup 阶段 —— 名为 "typecheck" 的 check 其实
+ * 从来没执行过类型检查。这类问题应该被自动发现，而不是靠翻日志。
+ */
+{
+  const LOCKFILES = ['package-lock.json', 'npm-shrinkwrap.json', 'yarn.lock', 'pnpm-lock.yaml'];
+  for (const repo of repos) {
+    const pkg = readJson(repo, 'package.json');
+    if (!pkg) continue;
+
+    const depCount =
+      Object.keys(pkg.dependencies ?? {}).length + Object.keys(pkg.devDependencies ?? {}).length;
+
+    // CI 里用了 setup-node 的 cache: npm 就必须有 lockfile，否则 setup 阶段直接失败
+    let usesNpmCache = false;
+    const wfDir = join(root, repo, '.github', 'workflows');
+    if (existsSync(wfDir)) {
+      usesNpmCache = readdirSync(wfDir).some((file) =>
+        /cache:\s*npm/.test(read(repo, join('.github', 'workflows', file)) ?? ''),
+      );
+    }
+
+    const present = LOCKFILES.filter((f) => existsSync(join(root, repo, f)));
+
+    if (present.length === 0) {
+      // 零依赖的包（如两个 SDK）本来就没有 lockfile，这是正常的
+      if (usesNpmCache) {
+        fail(`${repo}: CI 用了 setup-node 的 cache: npm 但仓库里没有 lockfile — setup 阶段会直接失败`);
+      } else if (depCount > 0) {
+        fail(`${repo}: 有 ${depCount} 个依赖但没有提交 lockfile，依赖不锁定`);
+      }
+    } else if (present.length > 1) {
+      fail(`${repo}: 同时存在多个 lockfile — ${present.join(', ')}`);
+    }
+
+    if (depCount > 0) {
+      const gitignore = read(repo, '.gitignore') ?? '';
+      for (const lock of LOCKFILES) {
+        if (new RegExp(`^${lock.replace(/\./g, '\\.')}\\s*$`, 'm').test(gitignore)) {
+          fail(`${repo}/.gitignore: 忽略了 ${lock}。本仓是要部署的应用，应锁定依赖`);
+        }
+      }
+    }
+  }
+}
+
+/* ── 9. Worker 仓是否有测试 ─────────────────────────────────── */
 {
   for (const repo of WORKERS) {
     if (!repos.includes(repo)) continue;
