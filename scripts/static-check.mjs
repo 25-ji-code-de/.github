@@ -194,7 +194,69 @@ function collect(extensions) {
   console.log(`checked ${checked} vendored file(s)`);
 }
 
-/* ── 4. Cloudflare Pages _headers ───────────────────────────── */
+/* ── 4. 源码里的裸控制字符 ─────────────────────────────────────
+ *
+ * 这几类字符在源码里**永远**是错的或恶意的，不存在合法用法：
+ *
+ *   NUL / BEL / ESC / DEL 等 C0 控制符
+ *     —— 让 grep 与 git 把整个文件当成二进制，diff 不可读。
+ *        storage-worker 的测试里就有两个裸 NUL（我自己写的），
+ *        `grep sanitize` 直接回 "Binary file matches"。
+ *   BOM 出现在文件中间
+ *     —— 首字节的 BOM 另有检查（_headers 那一节），中间的只会是意外。
+ *   U+202E RLO 等双向覆盖符
+ *     —— 能让源码的**显示顺序**与实际执行顺序不一致（trojan source）。
+ *
+ * 需要这些字符**作为数据**时写 \u 转义，不要写字面量 ——
+ * 字面量在编辑器里不可见，读的人（包括写的人）会误判。
+ *
+ * 刻意不管 NBSP 与全角空格：它们在正则、字体子集、文案里都有正当用途，
+ * 报了只会逼人加豁免。
+ */
+{
+  const FORBIDDEN = new Map([
+    [0x00, 'NUL'], [0x01, 'SOH'], [0x02, 'STX'], [0x03, 'ETX'], [0x04, 'EOT'],
+    [0x05, 'ENQ'], [0x06, 'ACK'], [0x07, 'BEL'], [0x08, 'BS'], [0x0b, 'VT'],
+    [0x0c, 'FF'], [0x0e, 'SO'], [0x0f, 'SI'], [0x10, 'DLE'], [0x11, 'DC1'],
+    [0x12, 'DC2'], [0x13, 'DC3'], [0x14, 'DC4'], [0x15, 'NAK'], [0x16, 'SYN'],
+    [0x17, 'ETB'], [0x18, 'CAN'], [0x19, 'EM'], [0x1a, 'SUB'], [0x1b, 'ESC'],
+    [0x1c, 'FS'], [0x1d, 'GS'], [0x1e, 'RS'], [0x1f, 'US'], [0x7f, 'DEL'],
+    [0x202a, 'LRE'], [0x202b, 'RLE'], [0x202c, 'PDF'], [0x202d, 'LRO'],
+    [0x202e, 'RLO'], [0x2066, 'LRI'], [0x2067, 'RLI'], [0x2068, 'FSI'],
+    [0x2069, 'PDI'],
+    [0xfeff, 'BOM'],
+  ]);
+
+  const files = collect(['.js', '.mjs', '.cjs', '.css', '.json', '.md', '.html', '.yml', '.yaml']);
+  let scanned = 0;
+  let hits = 0;
+
+  for (const file of files) {
+    const text = readFileSync(file, 'utf8');
+    scanned += 1;
+    const lines = text.split(/\r?\n/);
+    lines.forEach((line, i) => {
+      [...line].forEach((ch, col) => {
+        const cp = ch.codePointAt(0);
+        // 文件首字节的 BOM 由 _headers 那一节单独处理，这里只看行内
+        if (cp === 0xfeff && i === 0 && col === 0) return;
+        const name = FORBIDDEN.get(cp);
+        if (name) {
+          hits += 1;
+          fail(
+            `${file}:${i + 1}:${col + 1}: 源码里有裸 ${name}（U+${cp
+              .toString(16)
+              .toUpperCase()
+              .padStart(4, '0')}）—— 需要它作为数据时请写 \\u 转义`,
+          );
+        }
+      });
+    });
+  }
+  console.log(`scanned ${scanned} source file(s) for control chars, ${hits} found`);
+}
+
+/* ── 5. Cloudflare Pages _headers ───────────────────────────── */
 {
   const headersPath = join(root, '_headers');
   if (!existsSync(headersPath)) {

@@ -167,6 +167,85 @@ describe('JSONC —— 官方允许注释的那几类', () => {
   });
 });
 
+describe('源码里的裸控制字符', () => {
+  /*
+   * 这类字符在源码里永远是错的或恶意的。真实案例：storage-worker 的测试
+   * 文件里有两个裸 NUL（我自己写进去的），后果不是行为错，是
+   * `grep sanitize` 直接回 "Binary file matches" —— 工具链全废。
+   *
+   * 需要它们作为数据时写 \u 转义。
+   */
+  const NUL = String.fromCharCode(0x00);
+  const ESC = String.fromCharCode(0x1b);
+  const DEL = String.fromCharCode(0x7f);
+  const BOM = String.fromCharCode(0xfeff);
+  const RLO = String.fromCharCode(0x202e);
+
+  test('干净的源码通过', () => {
+    const { code, out } = check({ 'js/a.js': "const s = '\\u0000';\n", _headers: GOOD_HEADERS });
+    assert.equal(code, 0, out);
+    assert.match(out, /scanned \d+ source file\(s\) for control chars, 0 found/);
+  });
+
+  test('裸 NUL 被抓，并给出行列', () => {
+    const { code, out } = check({ 'js/a.js': `const s = 'a${NUL}b';\n` });
+    assert.equal(code, 1);
+    assert.match(out, /js[\\/]a\.js:1:\d+: 源码里有裸 NUL（U\+0000）/);
+  });
+
+  test('ESC 与 DEL 也被抓', () => {
+    for (const [ch, name] of [[ESC, 'ESC'], [DEL, 'DEL']]) {
+      const { code, out } = check({ 'js/a.js': `const s = 'x${ch}y';\n` });
+      assert.equal(code, 1, name);
+      assert.match(out, new RegExp(`裸 ${name}`));
+    }
+  });
+
+  test('双向覆盖符被抓 —— 它能让显示顺序与执行顺序不一致', () => {
+    const { code, out } = check({ 'js/a.js': `// ${RLO}nimda si resu fi\n` });
+    assert.equal(code, 1);
+    assert.match(out, /裸 RLO/);
+  });
+
+  test('文件中间的 BOM 被抓', () => {
+    const { code, out } = check({ 'js/a.js': `const a = 1;\nconst b${BOM} = 2;\n` });
+    assert.equal(code, 1);
+    assert.match(out, /裸 BOM/);
+  });
+
+  test('文件首字节的 BOM 不在这里报 —— 那是 _headers 那一节的事', () => {
+    const { code, out } = check({ 'js/a.js': `${BOM}const a = 1;\n`, _headers: GOOD_HEADERS });
+    assert.equal(code, 0, out);
+  });
+
+  test('制表符与换行不算 —— 它们是正常排版', () => {
+    const { code, out } = check({ 'js/a.js': 'const a = {\n\tb: 1,\n};\n', _headers: GOOD_HEADERS });
+    assert.equal(code, 0, out);
+  });
+
+  test('NBSP 与全角空格不报 —— 它们有正当用途', () => {
+    /*
+     * 25ji 的 search.js 有 /　/g（匹配全角空格），
+     * puzzle-sekai 的字体子集脚本里有 NBSP。报了只会逼人加豁免。
+     * 可读性问题另说，但那不该由 CI 来拦。
+     */
+    const NBSP = String.fromCharCode(0x00a0);
+    const IDEO = String.fromCharCode(0x3000);
+    const { code, out } = check({
+      'js/a.js': `const re = /${IDEO}/g;\nconst s = '${NBSP}';\n`,
+      _headers: GOOD_HEADERS,
+    });
+    assert.equal(code, 0, out);
+  });
+
+  test('多种扩展名都扫', () => {
+    for (const path of ['a.js', 'a.css', 'a.md', 'a.yml', 'a.html']) {
+      const { code } = check({ [path]: `x${NUL}y\n` });
+      assert.equal(code, 1, path);
+    }
+  });
+});
+
 describe('_headers —— 结构', () => {
   test('合规的 _headers 通过', () => {
     const { code, out } = check({ _headers: GOOD_HEADERS });
@@ -189,7 +268,9 @@ describe('_headers —— 结构', () => {
   });
 
   test('带 BOM 会报', () => {
-    const { code, out } = check({ _headers: `﻿${GOOD_HEADERS}` });
+    // 写 \ufeff 转义而不是字面 BOM —— 字面量在编辑器里完全不可见，
+    // 读的人会以为这个 fixture 和普通的没区别
+    const { code, out } = check({ _headers: `\ufeff${GOOD_HEADERS}` });
     assert.equal(code, 1);
     assert.match(out, /带 UTF-8 BOM/);
   });
