@@ -58,19 +58,84 @@ function collect(extensions) {
   console.log(`checked ${files.length} JavaScript file(s), ${failed} failed`);
 }
 
-/* ── 2. JSON 合法性 ─────────────────────────────────────────── */
+/* ── 2. JSON 合法性 ───────────────────────────────────────────
+ *
+ * 有几类文件**官方就是 JSONC**（允许注释与尾逗号）：`tsconfig.json`、
+ * `jsconfig.json`、`*.jsonc`、`.vscode/*.json`、`wrangler.jsonc`。
+ * 直接 JSON.parse 会把这些合法文件判成语法错误 ——
+ * nako 与 sekai-pass 的 tsconfig 里就有注释（那是有用的注释，
+ * 解释了为什么开 allowImportingTsExtensions）。
+ *
+ * 这两个仓目前没用这个 reusable workflow，所以还没炸过。但一旦
+ * 接进来就会立刻红在一个完全合法的文件上 —— 那种红最消耗信任。
+ */
 {
-  const files = collect(['.json']);
+  /** 这些路径按 JSONC 处理。 */
+  const JSONC = /(?:^|[\\/])(?:tsconfig|jsconfig)[^\\/]*\.json$|\.jsonc$|[\\/]\.vscode[\\/][^\\/]+\.json$/i;
+
+  /**
+   * 去掉注释与尾逗号。
+   *
+   * 必须逐字符走：简单的正则会把字符串里的 `//` 当成注释开头，
+   * 而 JSON 里到处是 URL（`"https://…"`）。
+   */
+  function stripJsonc(text) {
+    let out = '';
+    let i = 0;
+    let inString = false;
+    while (i < text.length) {
+      const c = text[i];
+      if (inString) {
+        out += c;
+        if (c === '\\') {
+          out += text[i + 1] ?? '';
+          i += 2;
+          continue;
+        }
+        if (c === '"') inString = false;
+        i += 1;
+        continue;
+      }
+      if (c === '"') {
+        inString = true;
+        out += c;
+        i += 1;
+        continue;
+      }
+      if (c === '/' && text[i + 1] === '/') {
+        while (i < text.length && text[i] !== '\n') i += 1;
+        continue;
+      }
+      if (c === '/' && text[i + 1] === '*') {
+        i += 2;
+        while (i < text.length && !(text[i] === '*' && text[i + 1] === '/')) i += 1;
+        i += 2;
+        continue;
+      }
+      out += c;
+      i += 1;
+    }
+    // 尾逗号：`,` 后面只跟空白再跟 } 或 ]
+    return out.replace(/,(\s*[}\]])/g, '$1');
+  }
+
+  const files = collect(['.json', '.jsonc']);
   let failed = 0;
+  let jsonc = 0;
   for (const file of files) {
+    const raw = readFileSync(file, 'utf8');
+    const isJsonc = JSONC.test(file);
+    if (isJsonc) jsonc += 1;
     try {
-      JSON.parse(readFileSync(file, 'utf8'));
+      JSON.parse(isJsonc ? stripJsonc(raw) : raw);
     } catch (err) {
       failed += 1;
       fail(`${file}: ${err.message}`);
     }
   }
-  console.log(`validated ${files.length} JSON file(s), ${failed} failed`);
+  console.log(
+    `validated ${files.length} JSON file(s)（其中 ${jsonc} 个按 JSONC 处理），${failed} failed`,
+  );
 }
 
 /* ── 3. 内联的上游文件与 tag 一致 ──────────────────────────────

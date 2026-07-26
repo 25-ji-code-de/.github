@@ -81,13 +81,89 @@ describe('JSON 合法性', () => {
   test('合法 JSON 通过', () => {
     const { code, out } = check({ 'data/x.json': '{"a":1}' });
     assert.equal(code, 0);
-    assert.match(out, /validated 1 JSON file\(s\), 0 failed/);
+    assert.match(out, /validated 1 JSON file\(s\)/);
   });
 
   test('非法 JSON 被抓', () => {
     const { code, out } = check({ 'data/x.json': '{ not json }' });
     assert.equal(code, 1);
     assert.match(out, /x\.json/);
+  });
+
+  test('普通 .json 里的注释仍然算错', () => {
+    // 只有官方允许注释的那几类才放行
+    const { code, out } = check({ 'data/x.json': '{\n  // 注释\n  "a": 1\n}' });
+    assert.equal(code, 1);
+    assert.match(out, /x\.json/);
+  });
+});
+
+describe('JSONC —— 官方允许注释的那几类', () => {
+  /*
+   * tsconfig.json / jsconfig.json / *.jsonc / .vscode/*.json 都是 JSONC。
+   * 直接 JSON.parse 会把合法文件判成语法错误。nako 与 sekai-pass 的
+   * tsconfig 里就有注释（解释了为什么开 allowImportingTsExtensions）。
+   */
+  const WITH_COMMENTS = [
+    'tsconfig.json',
+    'tsconfig.build.json',
+    'jsconfig.json',
+    'config/settings.jsonc',
+    '.vscode/settings.json',
+  ];
+
+  for (const path of WITH_COMMENTS) {
+    test(`${path} 允许注释`, () => {
+      const { code, out } = check({
+        [path]: '{\n  // 行注释\n  /* 块注释 */\n  "a": 1,\n}',
+        _headers: GOOD_HEADERS,
+      });
+      assert.equal(code, 0, out);
+    });
+  }
+
+  test('允许尾逗号', () => {
+    const { code, out } = check({
+      'tsconfig.json': '{\n  "a": 1,\n  "b": [1, 2,],\n}',
+      _headers: GOOD_HEADERS,
+    });
+    assert.equal(code, 0, out);
+  });
+
+  test('字符串里的 // 不当作注释 —— JSON 里到处是 URL', () => {
+    /*
+     * 用正则粗暴去注释会把 "https://…" 从冒号后截断，
+     * 于是一个完全合法的文件被判成语法错误。
+     */
+    const { code, out } = check({
+      'tsconfig.json': '{\n  "url": "https://example.com/a//b",\n  "x": "/* 不是注释 */"\n}',
+      _headers: GOOD_HEADERS,
+    });
+    assert.equal(code, 0, out);
+  });
+
+  test('转义引号不会让字符串状态错乱', () => {
+    const { code, out } = check({
+      'tsconfig.json': '{\n  "a": "他说 \\"//\\" 不是注释"\n}',
+      _headers: GOOD_HEADERS,
+    });
+    assert.equal(code, 0, out);
+  });
+
+  test('JSONC 里真正的语法错误还是要报', () => {
+    // 放行注释不等于放行一切
+    const { code, out } = check({ 'tsconfig.json': '{\n  // 注释\n  "a": ,\n}' });
+    assert.equal(code, 1);
+    assert.match(out, /tsconfig\.json/);
+  });
+
+  test('日志里报出按 JSONC 处理的数量', () => {
+    const { out } = check({
+      'tsconfig.json': '{ "a": 1 }',
+      'data/plain.json': '{ "b": 2 }',
+      _headers: GOOD_HEADERS,
+    });
+    assert.match(out, /其中 1 个按 JSONC 处理/);
   });
 });
 
