@@ -1,0 +1,159 @@
+name: Static Check
+
+# 组织级可复用 workflow —— 供无构建步骤的静态站点仓库调用
+# （hub / nightcord / stickers / 25ji-sagyo）以及纯 JS 的 Worker 仓（gateway）。
+#
+# 调用方式：
+#   jobs:
+#     check:
+#       uses: 25-ji-code-de/.github/.github/workflows/static-check.yml@main
+#
+# 之所以做成可复用而不是各仓复制一份：生态里已经因为复制粘贴产生过
+# 四份漂移的 auth 客户端，CI 不要重蹈覆辙。
+
+on:
+  workflow_call:
+    inputs:
+      node-version:
+        description: Node 版本。默认 24（Node 20 已于 2026-04 EOL）
+        type: string
+        default: '24'
+      ignore-pattern:
+        description: 跳过检查的路径正则（压缩过的第三方库等）
+        type: string
+        default: 'node_modules|[\\/]libs[\\/]|\.min\.js$|package-lock\.json$'
+
+jobs:
+  static-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+
+      - name: Syntax-check JavaScript
+        env:
+          IGNORE_PATTERN: ${{ inputs.ignore-pattern }}
+        run: |
+          node --input-type=module -e '
+            import { readdirSync, statSync } from "node:fs";
+            import { join } from "node:path";
+            import { execFileSync } from "node:child_process";
+
+            const ignore = new RegExp(process.env.IGNORE_PATTERN);
+            const files = [];
+            (function walk(dir) {
+              for (const entry of readdirSync(dir)) {
+                if (entry === ".git") continue;
+                const full = join(dir, entry);
+                if (ignore.test(full)) continue;
+                if (statSync(full).isDirectory()) walk(full);
+                else if (full.endsWith(".js") || full.endsWith(".mjs")) files.push(full);
+              }
+            })(".");
+
+            let failed = 0;
+            for (const file of files) {
+              try {
+                execFileSync(process.execPath, ["--check", file], { stdio: "pipe" });
+              } catch (err) {
+                failed += 1;
+                console.error(`✗ ${file}`);
+                console.error(String(err.stderr).trim());
+              }
+            }
+            console.log(`checked ${files.length} JavaScript file(s), ${failed} failed`);
+            if (failed) process.exit(1);
+          '
+
+      - name: Validate JSON
+        env:
+          IGNORE_PATTERN: ${{ inputs.ignore-pattern }}
+        run: |
+          node --input-type=module -e '
+            import { readdirSync, statSync, readFileSync } from "node:fs";
+            import { join } from "node:path";
+
+            const ignore = new RegExp(process.env.IGNORE_PATTERN);
+            const files = [];
+            (function walk(dir) {
+              for (const entry of readdirSync(dir)) {
+                if (entry === ".git") continue;
+                const full = join(dir, entry);
+                if (ignore.test(full)) continue;
+                if (statSync(full).isDirectory()) walk(full);
+                else if (full.endsWith(".json")) files.push(full);
+              }
+            })(".");
+
+            let failed = 0;
+            for (const file of files) {
+              try {
+                JSON.parse(readFileSync(file, "utf8"));
+              } catch (err) {
+                failed += 1;
+                console.error(`✗ ${file}: ${err.message}`);
+              }
+            }
+            console.log(`validated ${files.length} JSON file(s), ${failed} failed`);
+            if (failed) process.exit(1);
+          '
+
+      - name: Check Cloudflare Pages _headers
+        run: |
+          node --input-type=module -e '
+            import { existsSync, readFileSync } from "node:fs";
+
+            if (!existsSync("_headers")) {
+              console.log("no _headers file — skipping");
+              process.exit(0);
+            }
+
+            let raw = readFileSync("_headers", "utf8");
+            const problems = [];
+
+            // BOM 会让第一条路径规则看起来是缩进的，Pages 侧同样会解析失败
+            if (raw.charCodeAt(0) === 0xfeff) {
+              problems.push("file starts with a UTF-8 BOM; _headers must be plain UTF-8 without BOM");
+              raw = raw.slice(1);
+            }
+
+            const lines = raw.split(/\r?\n/);
+            const seen = new Map();
+            let rule = null;
+
+            lines.forEach((line, i) => {
+              const n = i + 1;
+              if (!line.trim() || line.trimStart().startsWith("#")) return;
+              if (!/^\s/.test(line)) {
+                rule = line.trim();
+                // 同一路径出现多个块，行为依赖 Pages 的合并语义 —— 曾经踩过
+                if (seen.has(rule)) {
+                  problems.push(`line ${n}: duplicate rule "${rule}" (first seen on line ${seen.get(rule)}); merge them into one block`);
+                }
+                seen.set(rule, n);
+                return;
+              }
+              if (!rule) {
+                problems.push(`line ${n}: header line before any path rule`);
+                return;
+              }
+              if (!/^\s+[A-Za-z0-9-]+:\s*.+$/.test(line)) {
+                problems.push(`line ${n}: malformed header line: ${line.trim()}`);
+              }
+            });
+
+            const required = ["X-Content-Type-Options", "Referrer-Policy", "X-Frame-Options", "Permissions-Policy"];
+            const text = lines.join("\n");
+            for (const header of required) {
+              if (!text.includes(header)) problems.push(`missing required security header: ${header}`);
+            }
+
+            if (problems.length) {
+              for (const p of problems) console.error(`✗ ${p}`);
+              process.exit(1);
+            }
+            console.log(`_headers OK — ${seen.size} rule(s), all required security headers present`);
+          '
