@@ -7,7 +7,8 @@
   "scripts": {
     "test": "node --test \"test/*.test.mjs\"",
     "check-consistency": "node scripts/check-consistency.mjs ..",
-    "static-check": "node scripts/static-check.mjs ."
+    "static-check": "node scripts/static-check.mjs .",
+    "check-production": "node scripts/check-production.mjs"
   },
   "author": "The 25-ji-code-de Team",
   "license": "Apache-2.0",

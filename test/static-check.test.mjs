@@ -18,6 +18,7 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 
+import { execFileSync } from 'node:child_process';
 import { fixture, cleanup, run } from './helpers.mjs';
 
 const SCRIPT = 'static-check.mjs';
@@ -555,5 +556,174 @@ describe('有测试就得在 CI 里跑', () => {
       _headers: GOOD_HEADERS,
     });
     assert.equal(code, 0, out);
+  });
+});
+
+describe('D1 的 run() 结果：success 不是「改到了几行」', () => {
+  /*
+   * 缘起：sekai-pass 里同一个混淆出现了**三次**，后果一次比一次实在。
+   *
+   * `db.prepare(...).run()` 返回的 `success` 表示语句执行成功，
+   * 删/改了 0 行也是 true。最狠的一处是 revokeRefreshToken 恒返回 true，
+   * 导致 /oauth/revoke 里「撤 access token」那段在没有 hint 时**不可达**：
+   * 不带 hint 撤一个 access token，服务器返回 200，而 token 一直有效到过期。
+   *
+   * 做成检查是因为**这个形状在源码里长得完全正常** —— 三个人看过都没发现，
+   * 是写真 SQL 的测试时才炸出来的。
+   */
+  const D1_SRC = (body) =>
+    `export async function revoke(db, token) {\n${body}\n}\n`;
+
+  test('用 .run() 结果的 success 当判据 —— 报错', () => {
+    const { code, out } = check({
+      'src/tokens.js': D1_SRC(
+        '  const result = await db.prepare("DELETE FROM t WHERE token = ?").bind(token).run();\n' +
+          '  return result.success;',
+      ),
+      _headers: GOOD_HEADERS,
+    });
+    assert.equal(code, 1, out);
+    assert.match(out, /meta\.changes/);
+  });
+
+  test('改成 meta.changes —— 通过', () => {
+    const { code, out } = check({
+      'src/tokens.js': D1_SRC(
+        '  const result = await db.prepare("DELETE FROM t WHERE token = ?").bind(token).run();\n' +
+          '  return (result.meta?.changes ?? 0) > 0;',
+      ),
+      _headers: GOOD_HEADERS,
+    });
+    assert.equal(code, 0, out);
+  });
+
+  test('if (!x.success) 形式也报', () => {
+    const { code } = check({
+      'src/a.js': D1_SRC(
+        '  const r = await db.prepare("UPDATE t SET a = 1").run();\n' +
+          '  if (!r.success) { throw new Error("x"); }\n  return true;',
+      ),
+      _headers: GOOD_HEADERS,
+    });
+    assert.equal(code, 1);
+  });
+
+  test('外部 API 响应里的 success 不误报', () => {
+    /*
+     * Turnstile 的 siteverify 就返回 `{ success: boolean }`，那是合法的。
+     * 判据是「这个变量来自 .run()」而不是「出现了 .success」——
+     * 后者会把 sekai-pass 的 turnstile.ts 与 api.ts 全部误报进来。
+     */
+    const { code, out } = check({
+      'src/turnstile.js':
+        'export async function verify(token) {\n' +
+        '  const data = await (await fetch("https://x/siteverify")).json();\n' +
+        '  if (!data.success) { return false; }\n  return true;\n}\n',
+      _headers: GOOD_HEADERS,
+    });
+    assert.equal(code, 0, out);
+  });
+
+  test('同名变量但不是 run() 的结果，不误报', () => {
+    // 只看变量名会把这种也算上
+    const { code, out } = check({
+      'src/a.js':
+        'export function f(result) {\n  return result.success;\n}\n' +
+        'export async function g(db) { await db.prepare("SELECT 1").run(); }\n',
+      _headers: GOOD_HEADERS,
+    });
+    assert.equal(code, 0, out);
+  });
+
+  test('测试文件里不检查', () => {
+    // 测试里为了构造场景写什么都行
+    const { code, out } = check({
+      'test/a.test.mjs': D1_SRC(
+        '  const result = await db.prepare("DELETE FROM t").run();\n  return result.success;',
+      ),
+      '.github/workflows/ci.yml': 'name: CI\non: [push]\njobs:\n  t:\n    runs-on: ubuntu-latest\n    steps:\n      - run: npm test\n',
+      _headers: GOOD_HEADERS,
+    });
+    assert.equal(code, 0, out);
+  });
+});
+
+describe('git 检出里只看跟踪的文件', () => {
+  /*
+   * 缘起：这个脚本原本遍历整个工作区。CI 里没问题（干净检出，
+   * 工作区 == 跟踪的文件），但在开发者机器上：
+   *
+   *   docs          docs/.vitepress/dist/  → 2 处误报
+   *   puzzle-sekai  src-tauri/target/      → **170490 处**误报
+   *   三个 Worker 仓 .wrangler/            → 每处形状翻倍
+   *
+   * 全是 gitignore 掉的构建产物。后果不是「多打几行」，是**这个检查在
+   * 本地完全没法用** —— 而没法用的检查等于没有，还会训练人跳过输出。
+   *
+   * 下面这几条覆盖的是**新加的那条路径**：fixture 默认不是 git 仓库，
+   * 走的是回退分支，所以不 git init 的话这条路径一行都没被跑到。
+   */
+  const git = (root, ...args) =>
+    execFileSync('git', ['-C', root, ...args], { stdio: 'pipe' });
+
+  /** 建一个 git 仓库 fixture，只把 `tracked` 列出的文件加进索引。 */
+  function gitFixture(files, tracked) {
+    const root = fixture(files);
+    git(root, 'init', '-q');
+    git(root, 'config', 'user.email', 't@example.test');
+    git(root, 'config', 'user.name', 'test');
+    for (const f of tracked) git(root, 'add', '--', f);
+    git(root, 'commit', '-q', '-m', 'init');
+    return root;
+  }
+
+  test('未跟踪的坏文件被跳过', () => {
+    const root = gitFixture(
+      {
+        'src/good.js': 'export const a = 1;\n',
+        'dist/bundle.js': 'this is ( not valid javascript\n',
+        _headers: GOOD_HEADERS,
+      },
+      ['src/good.js', '_headers'],
+    );
+    try {
+      const { code, out } = run('static-check.mjs', [root]);
+      assert.equal(code, 0, out);
+      assert.ok(!out.includes('bundle.js'), '扫到了未跟踪的构建产物');
+    } finally {
+      cleanup(root);
+    }
+  });
+
+  test('跟踪的坏文件照样报', () => {
+    // 反过来钉：不能因为「按跟踪文件走」就把该报的也漏掉
+    const root = gitFixture(
+      {
+        'src/bad.js': 'this is ( not valid javascript\n',
+        _headers: GOOD_HEADERS,
+      },
+      ['src/bad.js', '_headers'],
+    );
+    try {
+      const { code, out } = run('static-check.mjs', [root]);
+      assert.equal(code, 1, out);
+      assert.match(out, /bad\.js/);
+    } finally {
+      cleanup(root);
+    }
+  });
+
+  test('不在 git 检出里时退回遍历工作区', () => {
+    /*
+     * 这条钉的是回退分支本身。没有它的话，把 trackedFiles() 改成
+     * 「永远返回空集合」会让所有检查静默地什么都不扫 —— 而测试全绿，
+     * 因为大部分 fixture 本来就期望「通过」。
+     */
+    const { code, out } = check({
+      'src/bad.js': 'this is ( not valid javascript\n',
+      _headers: GOOD_HEADERS,
+    });
+    assert.equal(code, 1, out);
+    assert.match(out, /bad\.js/);
   });
 });

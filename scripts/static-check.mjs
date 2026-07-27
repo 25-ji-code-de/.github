@@ -19,8 +19,15 @@ import { execFileSync } from 'node:child_process';
 import { argv, env } from 'node:process';
 
 const root = argv[2] || '.';
+/*
+ * `.wrangler` 是 wrangler dev 的本地构建缓存（三个 Worker 仓都 gitignore 了它）。
+ * 它里面是**整个 Worker 打包后的产物**，源码里的每一个形状在那里都会再出现一遍 ——
+ * 不排除的话，任何按内容匹配的检查在开发者机器上都会翻倍误报，
+ * 而在 CI 里（干净检出）又一切正常。这种「只在本地红」最消耗人。
+ */
 const ignore = new RegExp(
-  argv[3] || 'node_modules|[\\\\/]libs[\\\\/]|\\.min\\.js$|package-lock\\.json$',
+  argv[3] ||
+    'node_modules|[\\\\/]\\.wrangler[\\\\/]|[\\\\/]libs[\\\\/]|\\.min\\.js$|package-lock\\.json$',
 );
 
 /** checkout 共享脚本用的目录，不参与扫描。 */
@@ -29,6 +36,44 @@ const META_DIR = '_sekai_meta';
 const problems = [];
 const fail = (msg) => problems.push(msg);
 
+/**
+ * git 跟踪的文件集合；不在 git 检出里（或 git 不可用）时返回 null。
+ *
+ * ── 为什么要按跟踪文件走 ────────────────────────────────────────
+ *
+ * CI 里是干净检出，工作区 == 跟踪的文件，两种走法结果一样。
+ * 但在开发者机器上，工作区里还堆着构建产物，而它们**几乎全是
+ * gitignore 掉的**：
+ *
+ *   docs          docs/.vitepress/dist/    VitePress 打包产物 → 2 处误报
+ *   puzzle-sekai  src-tauri/target/        Tauri/Rust 产物   → **170490 处**误报
+ *   三个 Worker 仓 .wrangler/              wrangler dev 缓存 → 每处形状翻倍
+ *
+ * 后果不是"多打几行"，是**这个检查在本地完全没法用** —— 而没法用的检查
+ * 等于没有。更糟的是它会训练人跳过输出。
+ *
+ * 遍历工作区还有个更隐蔽的问题：产物里的东西**看起来像源码**
+ * （顶着 .js 后缀的二进制、压缩过的 chunk），报出来的问题全是真的，
+ * 只是与这个仓库的源码无关。
+ */
+function trackedFiles() {
+  try {
+    const out = execFileSync('git', ['-C', root, 'ls-files', '-z'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      maxBuffer: 64 * 1024 * 1024,
+    });
+    const set = new Set(
+      out.split('\0').filter(Boolean).map((p) => join(root, p)),
+    );
+    return set.size ? set : null;
+  } catch {
+    return null;
+  }
+}
+
+const TRACKED = trackedFiles();
+
 function collect(extensions) {
   const out = [];
   (function walk(dir) {
@@ -36,8 +81,18 @@ function collect(extensions) {
       if (entry === '.git' || entry === META_DIR) continue;
       const full = join(dir, entry);
       if (ignore.test(full)) continue;
-      if (statSync(full).isDirectory()) walk(full);
-      else if (extensions.some((e) => full.endsWith(e))) out.push(full);
+      let st;
+      try {
+        st = statSync(full);
+      } catch {
+        continue; // 悬空符号链接之类，跳过而不是让整个检查崩掉
+      }
+      if (st.isDirectory()) walk(full);
+      else if (extensions.some((e) => full.endsWith(e))) {
+        // 在 git 检出里就只看跟踪的文件；不在的话退回遍历工作区
+        if (TRACKED && !TRACKED.has(full)) continue;
+        out.push(full);
+      }
     }
   })(root);
   return out;
@@ -381,6 +436,53 @@ function collect(extensions) {
 
     console.log(`_headers: ${seen.size} 条路径规则，安全头齐全`);
   }
+}
+
+/* ── D1 的 run() 结果：success 不是「改到了几行」 ──────────────── */
+{
+  /*
+   * `db.prepare(...).run()` 返回的 `success` 表示**语句执行成功**，
+   * 删/改了 0 行也是 true。想知道有没有真的动到行，要看 `meta.changes`。
+   *
+   * 这个混淆在 sekai-pass 里出现过**三次**，后果一次比一次实在：
+   *
+   *   revokeRefreshToken  恒返回 true → /oauth/revoke 里「撤 access token」
+   *                       那段代码在没有 hint 时**不可达**。不带 hint 撤一个
+   *                       access token：返回 200，而 token 一直有效到过期。
+   *   revokeAccessToken   同样的写法，只是当时没有生产调用方，潜伏着
+   *   （第三处是我修上面两处时又内联了一遍）
+   *
+   * 判据：`return`/`if` 里直接用某个来自 `.run()` 的结果的 `.success`。
+   * 只报**同一函数内**能看到 `.run()` 的情况，避免把 Turnstile 这类
+   * 外部 API 的 `success` 字段误报进来（那个是合法的）。
+   */
+  const files = collect(['.js', '.mjs', '.ts']).filter((f) => !/[\\/]test[s]?[\\/]/.test(f));
+  let checked = 0;
+  for (const file of files) {
+    const src = readFileSync(file, 'utf8');
+    if (!src.includes('.run()')) continue;
+    checked++;
+
+    const lines = src.split(/\r?\n/);
+    for (let i = 0; i < lines.length; i++) {
+      const m = /(?:return|if\s*\(!?)\s*(\w+)\.success\b/.exec(lines[i]);
+      if (!m) continue;
+      const varName = m[1];
+
+      // 往回找这个变量是不是 .run() 的结果（30 行窗口，够覆盖一个函数体）
+      const window = lines.slice(Math.max(0, i - 30), i).join('\n');
+      const assigned = new RegExp(
+        `(?:const|let|var)\\s+${varName}\\s*=[\\s\\S]{0,200}?\\.run\\(\\)`,
+      ).test(window);
+      if (!assigned) continue;
+
+      fail(
+        `${file.replace(root, '.')}:${i + 1}: 用 \`${varName}.success\` 判断 D1 写操作是否生效 —— ` +
+          'success 表示语句执行成功，改了 0 行也是 true。要判断有没有动到行请看 `meta.changes`',
+      );
+    }
+  }
+  if (checked) console.log(`D1 run() 结果判定：检查了 ${checked} 个文件`);
 }
 
 /* ── 输出 ───────────────────────────────────────────────────── */
