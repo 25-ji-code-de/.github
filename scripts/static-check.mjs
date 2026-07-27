@@ -36,6 +36,44 @@ const META_DIR = '_sekai_meta';
 const problems = [];
 const fail = (msg) => problems.push(msg);
 
+/**
+ * git 跟踪的文件集合；不在 git 检出里（或 git 不可用）时返回 null。
+ *
+ * ── 为什么要按跟踪文件走 ────────────────────────────────────────
+ *
+ * CI 里是干净检出，工作区 == 跟踪的文件，两种走法结果一样。
+ * 但在开发者机器上，工作区里还堆着构建产物，而它们**几乎全是
+ * gitignore 掉的**：
+ *
+ *   docs          docs/.vitepress/dist/    VitePress 打包产物 → 2 处误报
+ *   puzzle-sekai  src-tauri/target/        Tauri/Rust 产物   → **170490 处**误报
+ *   三个 Worker 仓 .wrangler/              wrangler dev 缓存 → 每处形状翻倍
+ *
+ * 后果不是"多打几行"，是**这个检查在本地完全没法用** —— 而没法用的检查
+ * 等于没有。更糟的是它会训练人跳过输出。
+ *
+ * 遍历工作区还有个更隐蔽的问题：产物里的东西**看起来像源码**
+ * （顶着 .js 后缀的二进制、压缩过的 chunk），报出来的问题全是真的，
+ * 只是与这个仓库的源码无关。
+ */
+function trackedFiles() {
+  try {
+    const out = execFileSync('git', ['-C', root, 'ls-files', '-z'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      maxBuffer: 64 * 1024 * 1024,
+    });
+    const set = new Set(
+      out.split('\0').filter(Boolean).map((p) => join(root, p)),
+    );
+    return set.size ? set : null;
+  } catch {
+    return null;
+  }
+}
+
+const TRACKED = trackedFiles();
+
 function collect(extensions) {
   const out = [];
   (function walk(dir) {
@@ -43,8 +81,18 @@ function collect(extensions) {
       if (entry === '.git' || entry === META_DIR) continue;
       const full = join(dir, entry);
       if (ignore.test(full)) continue;
-      if (statSync(full).isDirectory()) walk(full);
-      else if (extensions.some((e) => full.endsWith(e))) out.push(full);
+      let st;
+      try {
+        st = statSync(full);
+      } catch {
+        continue; // 悬空符号链接之类，跳过而不是让整个检查崩掉
+      }
+      if (st.isDirectory()) walk(full);
+      else if (extensions.some((e) => full.endsWith(e))) {
+        // 在 git 检出里就只看跟踪的文件；不在的话退回遍历工作区
+        if (TRACKED && !TRACKED.has(full)) continue;
+        out.push(full);
+      }
     }
   })(root);
   return out;
