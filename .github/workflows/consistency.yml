@@ -4,7 +4,7 @@ name: Cross-repo Consistency
 # 这个 workflow 把全部仓拉到一起，比对那些必须一致、但没有任何
 # 单仓机制能保证一致的东西。
 #
-# 生态里已经因为缺这层检查踩过：四份漂移的 auth 客户端、三种互不兼容的
+# 生态里已经因为缺这层检查踩过：五份漂移的 auth 客户端、三种互不兼容的
 # 错误信封、跨越两年的 compatibility_date、指向旧账号的 repository 字段。
 
 on:
@@ -37,7 +37,7 @@ jobs:
         run: |
           mkdir -p repos
           for repo in 25ji-sagyo docs gateway hub nako nightcord \
-                      sekai-auth sekai-pass sekai-worker-kit \
+                      puzzle-sekai sekai-auth sekai-pass sekai-worker-kit \
                       stickers stickers-maker; do
             echo "::group::clone $repo"
             git clone --depth 1 --quiet \

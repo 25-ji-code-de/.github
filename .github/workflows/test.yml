@@ -1,0 +1,22 @@
+name: Test scripts
+
+# scripts/ 下这两个脚本一个是全生态唯一的跨仓漂移检测，一个被 4 个仓当
+# reusable workflow 调用 —— 它们坏掉的代价比任何单仓都大，但此前零测试。
+# 一条规则悄悄失效不会有人发现：定时任务照样绿，只是什么都没检查出来。
+
+on:
+  push:
+    branches: [main]
+  # 不限定 base 分支 —— 栈式 PR（base 指向另一个特性分支）也应该跑 CI
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: npm test

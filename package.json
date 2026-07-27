@@ -1,0 +1,21 @@
+{
+  "name": "sekai-meta-scripts",
+  "version": "0.1.0",
+  "private": true,
+  "description": "生态共用的跨仓检查脚本（供 .github reusable workflow 调用）",
+  "type": "module",
+  "scripts": {
+    "test": "node --test \"test/*.test.mjs\"",
+    "check-consistency": "node scripts/check-consistency.mjs ..",
+    "static-check": "node scripts/static-check.mjs ."
+  },
+  "author": "The 25-ji-code-de Team",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/25-ji-code-de/.github.git"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}

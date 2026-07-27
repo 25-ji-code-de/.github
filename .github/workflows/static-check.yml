@@ -9,7 +9,7 @@ name: Static Check
 #       uses: 25-ji-code-de/.github/.github/workflows/static-check.yml@main
 #
 # 之所以做成可复用而不是各仓复制一份：生态里已经因为复制粘贴产生过
-# 四份漂移的 auth 客户端，CI 不要重蹈覆辙。
+# 五份漂移的 auth 客户端，CI 不要重蹈覆辙。
 #
 # 检查逻辑在 scripts/static-check.mjs，不内联在这里 —— 内联进
 # `node -e '...'` 曾经被 bash 单引号坑过一次（CSP 校验的正则含 'self'，
