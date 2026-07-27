@@ -18,6 +18,7 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 
+import { execFileSync } from 'node:child_process';
 import { fixture, cleanup, run } from './helpers.mjs';
 
 const SCRIPT = 'static-check.mjs';
@@ -644,5 +645,85 @@ describe('D1 的 run() 结果：success 不是「改到了几行」', () => {
       _headers: GOOD_HEADERS,
     });
     assert.equal(code, 0, out);
+  });
+});
+
+describe('git 检出里只看跟踪的文件', () => {
+  /*
+   * 缘起：这个脚本原本遍历整个工作区。CI 里没问题（干净检出，
+   * 工作区 == 跟踪的文件），但在开发者机器上：
+   *
+   *   docs          docs/.vitepress/dist/  → 2 处误报
+   *   puzzle-sekai  src-tauri/target/      → **170490 处**误报
+   *   三个 Worker 仓 .wrangler/            → 每处形状翻倍
+   *
+   * 全是 gitignore 掉的构建产物。后果不是「多打几行」，是**这个检查在
+   * 本地完全没法用** —— 而没法用的检查等于没有，还会训练人跳过输出。
+   *
+   * 下面这几条覆盖的是**新加的那条路径**：fixture 默认不是 git 仓库，
+   * 走的是回退分支，所以不 git init 的话这条路径一行都没被跑到。
+   */
+  const git = (root, ...args) =>
+    execFileSync('git', ['-C', root, ...args], { stdio: 'pipe' });
+
+  /** 建一个 git 仓库 fixture，只把 `tracked` 列出的文件加进索引。 */
+  function gitFixture(files, tracked) {
+    const root = fixture(files);
+    git(root, 'init', '-q');
+    git(root, 'config', 'user.email', 't@example.test');
+    git(root, 'config', 'user.name', 'test');
+    for (const f of tracked) git(root, 'add', '--', f);
+    git(root, 'commit', '-q', '-m', 'init');
+    return root;
+  }
+
+  test('未跟踪的坏文件被跳过', () => {
+    const root = gitFixture(
+      {
+        'src/good.js': 'export const a = 1;\n',
+        'dist/bundle.js': 'this is ( not valid javascript\n',
+        _headers: GOOD_HEADERS,
+      },
+      ['src/good.js', '_headers'],
+    );
+    try {
+      const { code, out } = run('static-check.mjs', [root]);
+      assert.equal(code, 0, out);
+      assert.ok(!out.includes('bundle.js'), '扫到了未跟踪的构建产物');
+    } finally {
+      cleanup(root);
+    }
+  });
+
+  test('跟踪的坏文件照样报', () => {
+    // 反过来钉：不能因为「按跟踪文件走」就把该报的也漏掉
+    const root = gitFixture(
+      {
+        'src/bad.js': 'this is ( not valid javascript\n',
+        _headers: GOOD_HEADERS,
+      },
+      ['src/bad.js', '_headers'],
+    );
+    try {
+      const { code, out } = run('static-check.mjs', [root]);
+      assert.equal(code, 1, out);
+      assert.match(out, /bad\.js/);
+    } finally {
+      cleanup(root);
+    }
+  });
+
+  test('不在 git 检出里时退回遍历工作区', () => {
+    /*
+     * 这条钉的是回退分支本身。没有它的话，把 trackedFiles() 改成
+     * 「永远返回空集合」会让所有检查静默地什么都不扫 —— 而测试全绿，
+     * 因为大部分 fixture 本来就期望「通过」。
+     */
+    const { code, out } = check({
+      'src/bad.js': 'this is ( not valid javascript\n',
+      _headers: GOOD_HEADERS,
+    });
+    assert.equal(code, 1, out);
+    assert.match(out, /bad\.js/);
   });
 });
