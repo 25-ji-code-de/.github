@@ -19,8 +19,15 @@ import { execFileSync } from 'node:child_process';
 import { argv, env } from 'node:process';
 
 const root = argv[2] || '.';
+/*
+ * `.wrangler` 是 wrangler dev 的本地构建缓存（三个 Worker 仓都 gitignore 了它）。
+ * 它里面是**整个 Worker 打包后的产物**，源码里的每一个形状在那里都会再出现一遍 ——
+ * 不排除的话，任何按内容匹配的检查在开发者机器上都会翻倍误报，
+ * 而在 CI 里（干净检出）又一切正常。这种「只在本地红」最消耗人。
+ */
 const ignore = new RegExp(
-  argv[3] || 'node_modules|[\\\\/]libs[\\\\/]|\\.min\\.js$|package-lock\\.json$',
+  argv[3] ||
+    'node_modules|[\\\\/]\\.wrangler[\\\\/]|[\\\\/]libs[\\\\/]|\\.min\\.js$|package-lock\\.json$',
 );
 
 /** checkout 共享脚本用的目录，不参与扫描。 */
@@ -381,6 +388,53 @@ function collect(extensions) {
 
     console.log(`_headers: ${seen.size} 条路径规则，安全头齐全`);
   }
+}
+
+/* ── D1 的 run() 结果：success 不是「改到了几行」 ──────────────── */
+{
+  /*
+   * `db.prepare(...).run()` 返回的 `success` 表示**语句执行成功**，
+   * 删/改了 0 行也是 true。想知道有没有真的动到行，要看 `meta.changes`。
+   *
+   * 这个混淆在 sekai-pass 里出现过**三次**，后果一次比一次实在：
+   *
+   *   revokeRefreshToken  恒返回 true → /oauth/revoke 里「撤 access token」
+   *                       那段代码在没有 hint 时**不可达**。不带 hint 撤一个
+   *                       access token：返回 200，而 token 一直有效到过期。
+   *   revokeAccessToken   同样的写法，只是当时没有生产调用方，潜伏着
+   *   （第三处是我修上面两处时又内联了一遍）
+   *
+   * 判据：`return`/`if` 里直接用某个来自 `.run()` 的结果的 `.success`。
+   * 只报**同一函数内**能看到 `.run()` 的情况，避免把 Turnstile 这类
+   * 外部 API 的 `success` 字段误报进来（那个是合法的）。
+   */
+  const files = collect(['.js', '.mjs', '.ts']).filter((f) => !/[\\/]test[s]?[\\/]/.test(f));
+  let checked = 0;
+  for (const file of files) {
+    const src = readFileSync(file, 'utf8');
+    if (!src.includes('.run()')) continue;
+    checked++;
+
+    const lines = src.split(/\r?\n/);
+    for (let i = 0; i < lines.length; i++) {
+      const m = /(?:return|if\s*\(!?)\s*(\w+)\.success\b/.exec(lines[i]);
+      if (!m) continue;
+      const varName = m[1];
+
+      // 往回找这个变量是不是 .run() 的结果（30 行窗口，够覆盖一个函数体）
+      const window = lines.slice(Math.max(0, i - 30), i).join('\n');
+      const assigned = new RegExp(
+        `(?:const|let|var)\\s+${varName}\\s*=[\\s\\S]{0,200}?\\.run\\(\\)`,
+      ).test(window);
+      if (!assigned) continue;
+
+      fail(
+        `${file.replace(root, '.')}:${i + 1}: 用 \`${varName}.success\` 判断 D1 写操作是否生效 —— ` +
+          'success 表示语句执行成功，改了 0 行也是 true。要判断有没有动到行请看 `meta.changes`',
+      );
+    }
+  }
+  if (checked) console.log(`D1 run() 结果判定：检查了 ${checked} 个文件`);
 }
 
 /* ── 输出 ───────────────────────────────────────────────────── */

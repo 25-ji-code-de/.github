@@ -557,3 +557,92 @@ describe('有测试就得在 CI 里跑', () => {
     assert.equal(code, 0, out);
   });
 });
+
+describe('D1 的 run() 结果：success 不是「改到了几行」', () => {
+  /*
+   * 缘起：sekai-pass 里同一个混淆出现了**三次**，后果一次比一次实在。
+   *
+   * `db.prepare(...).run()` 返回的 `success` 表示语句执行成功，
+   * 删/改了 0 行也是 true。最狠的一处是 revokeRefreshToken 恒返回 true，
+   * 导致 /oauth/revoke 里「撤 access token」那段在没有 hint 时**不可达**：
+   * 不带 hint 撤一个 access token，服务器返回 200，而 token 一直有效到过期。
+   *
+   * 做成检查是因为**这个形状在源码里长得完全正常** —— 三个人看过都没发现，
+   * 是写真 SQL 的测试时才炸出来的。
+   */
+  const D1_SRC = (body) =>
+    `export async function revoke(db, token) {\n${body}\n}\n`;
+
+  test('用 .run() 结果的 success 当判据 —— 报错', () => {
+    const { code, out } = check({
+      'src/tokens.js': D1_SRC(
+        '  const result = await db.prepare("DELETE FROM t WHERE token = ?").bind(token).run();\n' +
+          '  return result.success;',
+      ),
+      _headers: GOOD_HEADERS,
+    });
+    assert.equal(code, 1, out);
+    assert.match(out, /meta\.changes/);
+  });
+
+  test('改成 meta.changes —— 通过', () => {
+    const { code, out } = check({
+      'src/tokens.js': D1_SRC(
+        '  const result = await db.prepare("DELETE FROM t WHERE token = ?").bind(token).run();\n' +
+          '  return (result.meta?.changes ?? 0) > 0;',
+      ),
+      _headers: GOOD_HEADERS,
+    });
+    assert.equal(code, 0, out);
+  });
+
+  test('if (!x.success) 形式也报', () => {
+    const { code } = check({
+      'src/a.js': D1_SRC(
+        '  const r = await db.prepare("UPDATE t SET a = 1").run();\n' +
+          '  if (!r.success) { throw new Error("x"); }\n  return true;',
+      ),
+      _headers: GOOD_HEADERS,
+    });
+    assert.equal(code, 1);
+  });
+
+  test('外部 API 响应里的 success 不误报', () => {
+    /*
+     * Turnstile 的 siteverify 就返回 `{ success: boolean }`，那是合法的。
+     * 判据是「这个变量来自 .run()」而不是「出现了 .success」——
+     * 后者会把 sekai-pass 的 turnstile.ts 与 api.ts 全部误报进来。
+     */
+    const { code, out } = check({
+      'src/turnstile.js':
+        'export async function verify(token) {\n' +
+        '  const data = await (await fetch("https://x/siteverify")).json();\n' +
+        '  if (!data.success) { return false; }\n  return true;\n}\n',
+      _headers: GOOD_HEADERS,
+    });
+    assert.equal(code, 0, out);
+  });
+
+  test('同名变量但不是 run() 的结果，不误报', () => {
+    // 只看变量名会把这种也算上
+    const { code, out } = check({
+      'src/a.js':
+        'export function f(result) {\n  return result.success;\n}\n' +
+        'export async function g(db) { await db.prepare("SELECT 1").run(); }\n',
+      _headers: GOOD_HEADERS,
+    });
+    assert.equal(code, 0, out);
+  });
+
+  test('测试文件里不检查', () => {
+    // 测试里为了构造场景写什么都行
+    const { code, out } = check({
+      'test/a.test.mjs': D1_SRC(
+        '  const result = await db.prepare("DELETE FROM t").run();\n  return result.success;',
+      ),
+      '.github/workflows/ci.yml': 'name: CI\non: [push]\njobs:\n  t:\n    runs-on: ubuntu-latest\n    steps:\n      - run: npm test\n',
+      _headers: GOOD_HEADERS,
+    });
+    assert.equal(code, 0, out);
+  });
+});
