@@ -1,0 +1,41 @@
+name: Production contract
+
+# 拿真实的 HTTP 响应核对生态对外承诺的东西。
+#
+# 仓库里的测试只能验「代码是这么写的」。它验不了部署有没有发生、
+# 自定义域名有没有接上、定时任务有没有触发 —— 而 2026-07-27 一天之内
+# 这三类各查出一个已经躺了很久的故障：
+#
+#   hub.nightcord.de5.net 整站 525（构建一直是好的）
+#   JWKS 返回 {"keys":[]}，而 discovery 同时声明着签名算法
+#   三个 Worker 的 401 都不带 WWW-Authenticate
+#
+# 共同点：**代码是对的，测试是绿的，线上是坏的。**
+#
+# ── 为什么只有手动触发 ─────────────────────────────────────────
+#
+# 加 schedule 之前得先让它变绿：上面那几条都有对应的 PR 在等审阅
+# （sekai-pass#28/#29、gateway#8、nako#7、docs#3、hub#4 那个要在
+# Cloudflare 控制台修）。现在就定时跑的话，每天收到的都是已知问题，
+# 几天之后就没人看了 —— 那正是「永远红的检查」最典型的死法。
+#
+# 全绿之后把下面这段注释放开即可：
+#
+#   schedule:
+#     - cron: '17 2 * * *'
+#
+# 那时候它红就意味着真的有新东西坏了。
+
+on:
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Check production contracts
+        run: node scripts/check-production.mjs
