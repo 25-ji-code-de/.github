@@ -40,7 +40,7 @@ const EXCLUDED = new Set();
 const STATIC_SITES = ['hub', 'nightcord', 'stickers', '25ji-sagyo'];
 
 /** Cloudflare Worker 仓。 */
-const WORKERS = ['gateway', 'nako', 'sekai-pass', 'storage-worker'];
+const WORKERS = ['gateway', 'nako', 'sekai-pass'];
 
 /** 每个仓都应具备的社区文件。 */
 const COMMUNITY_FILES = ['LICENSE', 'README.md', 'CONTRIBUTING.md', 'SECURITY.md', 'CODE_OF_CONDUCT.md'];

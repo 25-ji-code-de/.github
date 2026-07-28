@@ -45,10 +45,6 @@ jobs:
               || echo "::warning::无法克隆 $repo，跳过"
             echo "::endgroup::"
           done
-          # storage-worker 目前还在个人账号下（见 storage-worker#2）
-          git clone --depth 1 --quiet \
-            https://github.com/bili-47177171806/storage-worker.git repos/storage-worker \
-            || echo "::warning::无法克隆 storage-worker，跳过"
 
       - name: Check consistency
         run: node _meta/scripts/check-consistency.mjs repos
