@@ -41,6 +41,15 @@ then application CSS. Set exactly one world on the root element:
 - `world-system`: Pass, Hub, documentation and control surfaces.
 - `world-night`: Nightcord, 25ji, Stickers and games.
 
+Static applications should vendor reusable component modules selectively through
+`scripts/sync-sekai-vendors.mjs`. Load those modules after the four token layers and before
+application CSS. Keep product-specific state or sizing in application CSS, but compose the
+upstream `sekai-*` class instead of copying its structural declarations under a local name.
+
+Do not vendor `css/index.css` into an established application unless it intentionally adopts
+the complete base/reset and every component layer. Prefer focused modules such as
+`css/layout/auth.css`, `css/layout/page.css`, or `css/layout/chat.css` to limit selector impact.
+
 ## Adapter boundary
 
 Auth adapters may map configuration, preserve historical storage keys, migrate stored data,

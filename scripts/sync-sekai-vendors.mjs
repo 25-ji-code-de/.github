@@ -33,16 +33,23 @@ const packages = [
     name: '@sekai/design',
     repository: '25-ji-code-de/sekai-design',
     tag: 'v0.1.0',
-    files: ['primitives', 'contract', 'world-system', 'world-night'].map((layer) => ({
-      source: `tokens/${layer}.css`,
-      targets: [
-        `hub/assets/css/sekai/${layer}.css`,
-        `sekai-pass/public/css/sekai/${layer}.css`,
-        `nightcord/vendor/sekai-design/${layer}.css`,
-        `stickers/vendor/sekai-design/${layer}.css`,
-        `25ji-sagyo/css/vendor/sekai-design/${layer}.css`,
-      ],
-    })),
+    files: [
+      ...['primitives', 'contract', 'world-system', 'world-night'].map((layer) => ({
+        source: `tokens/${layer}.css`,
+        targets: [
+          `hub/assets/css/sekai/${layer}.css`,
+          `sekai-pass/public/css/sekai/${layer}.css`,
+          `nightcord/vendor/sekai-design/${layer}.css`,
+          `stickers/vendor/sekai-design/${layer}.css`,
+          `25ji-sagyo/css/vendor/sekai-design/${layer}.css`,
+        ],
+      })),
+      { source: 'css/signatures.css', targets: ['sekai-pass/public/css/sekai/signatures.css'] },
+      { source: 'css/layout/auth.css', targets: ['sekai-pass/public/css/sekai/auth.css'] },
+      { source: 'css/layout/page.css', targets: ['hub/assets/css/sekai/page.css'] },
+      { source: 'css/layout/chat.css', targets: ['nightcord/vendor/sekai-design/chat.css'] },
+      { source: 'css/components/modal.css', targets: ['nightcord/vendor/sekai-design/modal.css'] },
+    ],
   },
 ];
 
