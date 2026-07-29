@@ -173,7 +173,7 @@ function requireConsistent(label, entries, { allowMissing = true } = {}) {
     if (!pkg) continue;
     const deps = { ...pkg.dependencies, ...pkg.devDependencies };
     for (const [name, spec] of Object.entries(deps)) {
-      if (!name.startsWith('@25-ji-code-de/')) continue;
+      if (!name.startsWith('@25-ji-code-de/') && name !== '@sekai/design') continue;
       if (!byPkg.has(name)) byPkg.set(name, []);
       byPkg.get(name).push([repo, spec]);
     }

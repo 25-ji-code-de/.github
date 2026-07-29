@@ -212,6 +212,7 @@ function collect(extensions) {
   const REPO_BY_PKG = {
     '@25-ji-code-de/sekai-auth': '25-ji-code-de/sekai-auth',
     '@25-ji-code-de/sekai-worker-kit': '25-ji-code-de/sekai-worker-kit',
+    '@sekai/design': '25-ji-code-de/sekai-design',
     '@25-ji-code-de/sekai-design': '25-ji-code-de/sekai-design',
   };
   const normalize = (s) => s.replace(/\r\n/g, '\n').trimEnd();

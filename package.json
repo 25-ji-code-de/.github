@@ -7,6 +7,8 @@
   "scripts": {
     "test": "node --test \"test/*.test.mjs\"",
     "check-consistency": "node scripts/check-consistency.mjs ..",
+    "sync-sekai-vendors": "node scripts/sync-sekai-vendors.mjs ..",
+    "check-sekai-vendors": "node scripts/sync-sekai-vendors.mjs .. --check",
     "static-check": "node scripts/static-check.mjs .",
     "check-production": "node scripts/check-production.mjs"
   },
